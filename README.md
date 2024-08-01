@@ -14,3 +14,5 @@ Open your terminal and run the script with
 bash <(curl -s https://raw.githubusercontent.com/Kiya6955/Abuse-Defender/main/abuse-defender.sh)
 ```
 Select option 1
+
+### If you wanna add IP-Ragnes to list send it on [Telegram](https://t.me/Kiya6955Contactbot)
