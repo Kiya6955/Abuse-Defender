@@ -87,8 +87,7 @@ function block_ips {
 
 function whitelist_ips {
     clear
-    echo "Enter IP-Ranges to whitelist (like 192.168.1.0/24):"
-    read ip_range
+    read -p "Enter IP-Ranges to whitelist (like 192.168.1.0/24): " ip_range
 
     iptables -I abuse-defender -d $ip_range -j ACCEPT
 
@@ -102,8 +101,7 @@ function whitelist_ips {
 
 function block_custom_ips {
     clear
-    echo "Enter IP-Ranges to block (like 192.168.1.0/24):"
-    read ip_range
+    read -p "Enter IP-Ranges to block (like 192.168.1.0/24): " ip_range
 
     iptables -A abuse-defender -d $ip_range -j DROP
 
@@ -118,8 +116,7 @@ function block_custom_ips {
 function view_rules {
     clear
     iptables -L abuse-defender -n
-    echo "Press Enter to return to Menu"
-    read -r dummy
+    read -p "Press Enter to return to Menu" dummy
     main_menu
 }
 
