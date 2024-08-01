@@ -90,7 +90,7 @@ function whitelist_ips {
     echo "Enter IP-Ranges to whitelist (like 192.168.1.0/24):"
     read ip_range
 
-    iptables -I abuse-defender -s $ip_range -j ACCEPT
+    iptables -I abuse-defender -d $ip_range -j ACCEPT
 
     iptables-save > /etc/iptables/rules.v4
 
