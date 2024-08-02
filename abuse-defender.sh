@@ -16,17 +16,19 @@ function main_menu {
     echo "1-Block Abuse IP-Ranges"
     echo "2-Whitelist an IP/IP-Ranges manually"
     echo "3-Block an IP/IP-Ranges manually"
-    echo "4-View Rules"
-    echo "5-Clear all rules"
-    echo "6-Exit"
+    echo "4-Block Torrent"
+    echo "5-View Rules"
+    echo "6-Clear all rules"
+    echo "7-Exit"
     read -p "Enter your choice: " choice
     case $choice in
     1) block_ips ;;
     2) whitelist_ips ;;
     3) block_custom_ips ;;
-    4) view_rules ;;
-    5) clear_chain ;;
-    6) echo "Exiting..."; exit 0 ;;
+    6) block_torrent ;;
+    5) view_rules ;;
+    6) clear_chain ;;
+    7) echo "Exiting..."; exit 0 ;;
     *) echo "Invalid option"; main_menu ;;
     esac
 }
@@ -113,6 +115,13 @@ function block_custom_ips {
     main_menu
 }
 
+function block_torrent {
+    bash -c "$(curl -fsSL https://raw.githubusercontent.com/090ebier/torrent-blocking-script/main/block_torrent.sh)"
+    echo "Torrent blocked successfully."
+    read -p "Press enter to return to Menu" dummy
+    main_menu
+}
+
 function view_rules {
     clear
     iptables -L abuse-defender -n
@@ -123,8 +132,10 @@ function view_rules {
 function clear_chain {
     clear
     iptables -F abuse-defender
+    iptables -F TORRENT_CHAIN_INPUT
+    iptables -F TORRENT_CHAIN_OUTPUT
+    iptables -F TORRENT_CHAIN_FORWARD
     iptables-save > /etc/iptables/rules.v4
-
     clear
     echo "All Rules cleared successfully."
     read -p "Press enter to return to Menu" dummy
