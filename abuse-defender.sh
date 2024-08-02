@@ -25,7 +25,7 @@ function main_menu {
     1) block_ips ;;
     2) whitelist_ips ;;
     3) block_custom_ips ;;
-    6) block_torrent ;;
+    4) block_torrent ;;
     5) view_rules ;;
     6) clear_chain ;;
     7) echo "Exiting..."; exit 0 ;;
