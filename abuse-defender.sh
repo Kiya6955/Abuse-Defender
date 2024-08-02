@@ -118,6 +118,7 @@ function block_custom_ips {
 function block_torrent {
     clear
     bash -c "$(curl -fsSL https://raw.githubusercontent.com/090ebier/torrent-blocking-script/main/block_torrent.sh)"
+    clear
     echo "Torrent blocked successfully."
     read -p "Press enter to return to Menu" dummy
     main_menu
