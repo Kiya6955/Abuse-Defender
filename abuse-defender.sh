@@ -73,7 +73,7 @@ function block_ips {
         for IP in $IP_LIST; do
             iptables -A abuse-defender -d $IP -j DROP
         done
-
+        echo '127.0.0.1 appclick.co' | sudo tee -a /etc/hosts
         iptables-save > /etc/iptables/rules.v4
 
         clear
@@ -134,6 +134,7 @@ function view_rules {
 function clear_chain {
     clear
     iptables -F abuse-defender
+    sudo sed -i '/127.0.0.1 appclick.co/d' /etc/hosts
     iptables -F TORRENT_CHAIN_INPUT
     iptables -F TORRENT_CHAIN_OUTPUT
     iptables -F TORRENT_CHAIN_FORWARD
