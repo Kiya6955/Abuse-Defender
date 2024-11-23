@@ -72,6 +72,7 @@ function block_ips {
             iptables -A abuse-defender -d $IP -j DROP
         done
         echo '127.0.0.1 appclick.co' | sudo tee -a /etc/hosts
+        echo '127.0.0.1 pushnotificationws.com' | sudo tee -a /etc/hosts
         iptables-save > /etc/iptables/rules.v4
 
         clear
