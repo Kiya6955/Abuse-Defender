@@ -77,6 +77,13 @@ function block_ips {
 
         clear
         echo "Abuse IP-Ranges blocked successfully."
+
+        read -p "Do you want to enable Auto-Update every 24 hours? [Y/N] : " enable_update
+        if [[ $enable_update == [Yy]* ]]; then
+            setup_auto_update
+            echo "Auto-Update has been enabled."
+        fi
+
         read -p "Press enter to return to Menu" dummy
         main_menu
     else
@@ -85,6 +92,23 @@ function block_ips {
         main_menu
     fi
 }
+
+function setup_auto_update {
+    cat <<EOF >/root/abuse-defender-update.sh
+#!/bin/bash
+iptables -F abuse-defender
+IP_LIST=\$(curl -s 'https://raw.githubusercontent.com/Kiya6955/Abuse-Defender/main/abuse-ips.ipv4')
+for IP in \$IP_LIST; do
+    iptables -A abuse-defender -d \$IP -j DROP
+done
+iptables-save > /etc/iptables/rules.v4
+EOF
+    chmod +x /root/abuse-defender-update.sh
+    
+    crontab -l 2>/dev/null | grep -v "/root/abuse-defender-update.sh" | crontab -
+    (crontab -l 2>/dev/null; echo "0 0 * * * /root/abuse-defender-update.sh") | crontab -
+}
+
 
 function whitelist_ips {
     clear
