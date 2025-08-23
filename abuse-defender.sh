@@ -88,9 +88,16 @@ function block_ips {
             main_menu
         fi
 
+        TMP_RULES=$(mktemp)
+        echo "*filter" > $TMP_RULES
+        echo ":abuse-defender - [0:0]" >> $TMP_RULES
         for IP in $IP_LIST; do
-            iptables -A abuse-defender -d $IP -j DROP
+        echo "-A abuse-defender -d $IP -j DROP" >> $TMP_RULES
         done
+        echo "COMMIT" >> $TMP_RULES
+        sudo iptables-restore < $TMP_RULES
+        rm -f $TMP_RULES
+
 
         echo '127.0.0.1 appclick.co' | tee -a /etc/hosts >/dev/null
         echo '127.0.0.1 pushnotificationws.com' | tee -a /etc/hosts >/dev/null
