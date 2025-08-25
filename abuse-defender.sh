@@ -176,15 +176,18 @@ function view_rules {
 
 function clear_chain {
     clear
-    iptables -F abuse-defender
-    iptables -F abuse-defender-custom
-    iptables -F abuse-defender-whitelist
+    echo "Clearing all Abuse Defender rules..."
+    iptables -F abuse-defender 2>/dev/null
+    iptables -F abuse-defender-custom 2>/dev/null
+    iptables -F abuse-defender-whitelist 2>/dev/null
+    iptables -X abuse-defender 2>/dev/null
+    iptables -X abuse-defender-custom 2>/dev/null
+    iptables -X abuse-defender-whitelist 2>/dev/null
     sed -i '/127.0.0.1 appclick.co/d' /etc/hosts
     sed -i '/127.0.0.1 pushnotificationws.com/d' /etc/hosts
-    crontab -l | grep -v "/root/abuse-defender-update.sh" | crontab -
-    iptables-save > /etc/iptables/rules.v4
-    clear
-    echo "All Rules cleared successfully."
+    crontab -l 2>/dev/null | grep -v "abuse-defender-update.sh" | crontab -
+    iptables-save > /etc/iptables/rules.v4 2>/dev/null
+    echo "All rules cleared successfully."
     read -p "Press enter to return to Menu" dummy
     main_menu
 }
