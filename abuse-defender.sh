@@ -73,8 +73,6 @@ DRY_RUN=0
 QUIET=0
 FORCE=0
 OPT_BACKEND=""
-OPT_NO_IPV6=0
-OPT_FAMILY=""
 OPT_JITTER=0
 OPT_KEEP_CONFIG=0
 OPT_CONFIRM_TIMEOUT=""
@@ -271,8 +269,6 @@ is_systemd() { [[ -d "$SYSTEMD_RUN" ]] && have systemctl; }
 CONFIG_SCHEMA=(
 "ENABLED|yes|^(yes|no)$|Master switch. 'no' keeps the config but removes all rules."
 "BACKEND|auto|^(auto|nft|ipset|iptables)$|Firewall backend: auto (nft > ipset+iptables > iptables), nft, ipset, iptables."
-"IP_FAMILY|both|^(both|4|6)$|Address families to protect: both (IPv4 + IPv6 when the host has IPv6), 4 (IPv4 only), 6 (IPv6 only)."
-"MODE|enforce|^(enforce|monitor)$|enforce = drop matching traffic; monitor = only count and log what would be dropped."
 "EGRESS_INTERFACES|auto|^(auto|all|[A-Za-z0-9_.-]+( [A-Za-z0-9_.-]+)*)$|Interfaces to filter: auto (interfaces holding a default route), all (every non-loopback interface), or a list like \"eth0 ens3\"."
 "CATEGORIES|bogons abuse|^((bogons|abuse|spamhaus|feodo)( (bogons|abuse|spamhaus|feodo))*)?$|Block categories: bogons abuse spamhaus feodo."
 "GEO_COUNTRIES||^([a-z]{2}( [a-z]{2})*)?$|Outbound country blocking, ISO codes, e.g. \"ir\" (empty = off)."
@@ -330,6 +326,7 @@ config_regex() {
 
 # Parse KEY=VALUE lines without ever executing the file.
 CONFIG_OBSOLETE=0
+MONITOR_NOTICE=0
 config_load() {
     config_defaults
     [[ -f "$CONF_FILE" ]] || return 0
@@ -345,10 +342,15 @@ config_load() {
         val="${val%%+([[:space:]])}"
         if [[ "$val" =~ ^\"(.*)\"$ || "$val" =~ ^\'(.*)\'$ ]]; then val="${BASH_REMATCH[1]}"; fi
         case $key in
-        IPV6)   # renamed in 2.0.0 -> IP_FAMILY
-            [[ $val == no ]] && CFG[IP_FAMILY]=4
+        IPV6|IP_FAMILY|LANGUAGE)   # removed settings: IPv6 is always automatic, UI is English
             CONFIG_OBSOLETE=1; continue ;;
-        LANGUAGE) CONFIG_OBSOLETE=1; continue ;;
+        MODE)
+            CONFIG_OBSOLETE=1
+            if [[ $val == monitor && $MONITOR_NOTICE -eq 0 ]]; then
+                MONITOR_NOTICE=1
+                warn "monitor mode no longer exists - protection is enforced (use 'disable' to turn it off)"
+            fi
+            continue ;;
         esac
         if ! re="$(config_regex "$key")"; then
             warn "config line $n: unknown key $key (ignored)"; continue
@@ -1002,17 +1004,13 @@ ipt_probe() {   # probe iptables features for family $1, sets IPT_HAS_*
     return 0
 }
 
-# choose BACKEND / NFT_FAMILY / IPV4_ON / IPV6_ON from config, options and kernel probes
+# choose BACKEND / NFT_FAMILY / IPV6_ON from config and kernel probes.
+# IPv4 is always protected; IPv6 only when the host has working IPv6 and the backend can filter it.
 select_backend() {
-    local want="${OPT_BACKEND:-${CFG[BACKEND]}}" fam="${OPT_FAMILY:-${CFG[IP_FAMILY]}}"
-    [[ $OPT_NO_IPV6 -eq 1 ]] && fam=4
+    local want="${OPT_BACKEND:-${CFG[BACKEND]}}"
     BACKEND=""; NFT_FAMILY=""; IPV4_ON=1; IPV6_ON=0
     local v6ok=0
-    if [[ $fam != 4 ]] && ipv6_available; then v6ok=1; fi
-    if [[ $fam == 6 ]]; then
-        [[ $v6ok -eq 1 ]] || die "IP_FAMILY=6 (IPv6 only) but this host has no working IPv6 - use 'both' or '4'"
-        IPV4_ON=0
-    fi
+    if ipv6_available; then v6ok=1; fi
 
     if [[ $DRY_RUN -eq 1 && $IS_ROOT -ne 1 ]]; then
         # no kernel access: guess from installed binaries
@@ -1026,23 +1024,20 @@ select_backend() {
 
     if [[ $want == auto || $want == nft ]]; then
         if nft_probe inet; then BACKEND=nft; NFT_FAMILY=inet; IPV6_ON=$v6ok
-        elif [[ $IPV4_ON -eq 1 ]] && nft_probe ip; then
+        elif nft_probe ip; then
             BACKEND=nft; NFT_FAMILY=ip
             [[ $v6ok -eq 1 ]] && warn "nftables 'inet' family unsupported here - IPv6 is not filtered"
         elif [[ $want == nft ]]; then die "BACKEND=nft requested but nftables is not usable on this host"
         fi
     fi
     if [[ -z "$BACKEND" ]]; then
-        local first=4
-        [[ $IPV4_ON -eq 0 ]] && first=6
-        have "$(ipt_cmd "$first")" || die "no usable firewall: install nftables (recommended) or $(ipt_cmd "$first")"
-        ipt_probe "$first" || die "$(ipt_cmd "$first") is installed but not usable (missing kernel support or privileges?)"
-        if [[ $IPV4_ON -eq 0 ]]; then IPV6_ON=1
-        elif [[ $v6ok -eq 1 ]] && have ip6tables && ip6tables -L -n >/dev/null 2>&1; then IPV6_ON=1; fi
+        have iptables || die "no usable firewall: install nftables (recommended) or iptables"
+        ipt_probe 4 || die "iptables is installed but not usable (missing kernel support or privileges?)"
+        if [[ $v6ok -eq 1 ]] && have ip6tables && ip6tables -L -n >/dev/null 2>&1; then IPV6_ON=1; fi
         if [[ $want != iptables && $IPT_HAS_SET -eq 1 ]] && have ipset; then BACKEND=ipset
         elif [[ $want == ipset ]]; then die "BACKEND=ipset requested but ipset is not usable"
         else BACKEND=iptables; fi
-        if [[ $IPV4_ON -eq 1 && $IPV6_ON -eq 1 ]]; then
+        if [[ $IPV6_ON -eq 1 ]]; then
             local c4=$IPT_HAS_CONNTRACK l4=$IPT_HAS_LOG u4=$IPT_HAS_LOGUID h4=$IPT_HAS_HASHLIMIT s4=$IPT_HAS_SET t4=$IPT_HAS_SETTARGET
             ipt_probe 6 || IPV6_ON=0
             # keep the intersection of features
@@ -1051,15 +1046,12 @@ select_backend() {
             if [[ $BACKEND == ipset && $IPT_HAS_SET -eq 0 ]]; then warn "ipset unusable for IPv6 - IPv6 rules skipped"; IPV6_ON=0; IPT_HAS_SET=$s4; fi
         fi
     fi
-    [[ $IPV4_ON -eq 0 && $IPV6_ON -ne 1 ]] && die "IPv6-only mode, but the selected backend cannot filter IPv6"
     return 0
 }
 
 active_fams() { [[ $IPV4_ON -eq 1 ]] && printf '4 '; [[ $IPV6_ON -eq 1 ]] && printf '6'; printf '\n'; }
 family_label() {   # family_label V4 V6
-    if [[ $1 == 1 && $2 == 1 ]]; then echo "IPv4+IPv6"
-    elif [[ $1 == 1 ]]; then echo "IPv4 only"
-    else echo "IPv6 only"; fi
+    if [[ $2 == 1 ]]; then echo "IPv4+IPv6"; else echo "IPv4 only (no IPv6 on this host)"; fi
 }
 
 iptables_variant() {
@@ -1153,8 +1145,6 @@ render_nft() {
     local out="$dir/ruleset.nft" name fam kind tag type ifs="" i
     local log=0 loguid=0 mods=1 verdict=" drop" pfx="AD-DROP"
     [[ ${CFG[LOG_BLOCKED]} == yes && $level -lt 2 ]] && log=1
-    # monitor mode: count + log what would be dropped, never drop
-    if [[ ${CFG[MODE]} == monitor ]]; then verdict=""; pfx="AD-MON"; [[ $level -lt 2 ]] && log=1; fi
     [[ $log -eq 1 && $level -lt 1 ]] && loguid=1
     [[ $level -ge 3 ]] && mods=0
     local rate="${CFG[LOG_RATE]}"
@@ -1282,12 +1272,8 @@ ipset_name() {  # setname(allow_v4) -> ad4-allow ; geo_ir_v4 -> ad4-geo-ir
 render_ipt() {
     local dir=$1 level=$2 use_set=0 fam
     [[ $BACKEND == ipset ]] && use_set=1
-    local log=0 loguid=0 mods=1 rate="${CFG[LOG_RATE]}" verdict=" -j DROP" pfx="AD-DROP" monitor=0
+    local log=0 loguid=0 mods=1 rate="${CFG[LOG_RATE]}" verdict=" -j DROP" pfx="AD-DROP"
     [[ ${CFG[LOG_BLOCKED]} == yes && $level -lt 2 && $IPT_HAS_LOG -eq 1 ]] && log=1
-    if [[ ${CFG[MODE]} == monitor ]]; then
-        monitor=1; verdict=""; pfx="AD-MON"
-        [[ $level -lt 2 && $IPT_HAS_LOG -eq 1 ]] && log=1
-    fi
     [[ $log -eq 1 && $level -lt 1 && $IPT_HAS_LOGUID -eq 1 ]] && loguid=1
     [[ $level -ge 3 ]] && mods=0
     : >"$dir/jumps.txt"; : >"$dir/chains.txt"; : >"$dir/ipsets.txt"
@@ -1382,8 +1368,7 @@ render_ipt() {
                     local uidopt=""; [[ $loguid -eq 1 ]] && uidopt=" --log-uid"
                     printf -- '-A %s-drop -m limit --limit %s/min --limit-burst 5 -j LOG --log-prefix "%s: " --log-level 6%s\n' "$IPT_PREFIX" "$rate" "$pfx" "$uidopt"
                 fi
-                if [[ $monitor -eq 1 ]]; then printf -- '-A %s-drop -j RETURN\n' "$IPT_PREFIX"
-                else printf -- '-A %s-drop -j DROP\n' "$IPT_PREFIX"; fi
+                printf -- '-A %s-drop -j DROP\n' "$IPT_PREFIX"
             } >>"$dir/chainbody.$fam"
         fi
         {
@@ -1444,8 +1429,8 @@ bundle_build() {
         level=$((level + 1))
     done
     {
-        printf 'version=%s\nbackend=%s\nnft_family=%s\nipv4=%s\nipv6=%s\nmode=%s\nlevel=%s\ncreated=%s\n' \
-            "$AD_VERSION" "$BACKEND" "$NFT_FAMILY" "$IPV4_ON" "$IPV6_ON" "${CFG[MODE]}" "$level" "$(now_epoch)"
+        printf 'version=%s\nbackend=%s\nnft_family=%s\nipv4=%s\nipv6=%s\nlevel=%s\ncreated=%s\n' \
+            "$AD_VERSION" "$BACKEND" "$NFT_FAMILY" "$IPV4_ON" "$IPV6_ON" "$level" "$(now_epoch)"
     } >"$dir/meta"
     printf '%s\n' ${RENDER_NOTES[@]+"${RENDER_NOTES[@]}"} | sort -u | grep . >"$dir/notes.txt" || true
     bundle_hash "$dir" >"$dir/hash"
@@ -1994,7 +1979,7 @@ apply_pipeline() {
     bundle_build "$new" || return 1
     if [[ -s "$new/notes.txt" ]]; then while read -r l; do warn "$l"; done <"$new/notes.txt"; fi
     if [[ $DRY_RUN -eq 1 ]]; then
-        say "----- dry-run: backend=$BACKEND$([[ $BACKEND == nft ]] && echo "/$NFT_FAMILY") $(family_label "$IPV4_ON" "$IPV6_ON") mode=${CFG[MODE]} egress=$( [[ -s $new/egress.txt ]] && paste -sd' ' "$new/egress.txt" || echo all) -----"
+        say "----- dry-run: backend=$BACKEND$([[ $BACKEND == nft ]] && echo "/$NFT_FAMILY") $(family_label "$IPV4_ON" "$IPV6_ON") egress=$( [[ -s $new/egress.txt ]] && paste -sd' ' "$new/egress.txt" || echo all) -----"
         say "auto-whitelist:"; sed 's/^/  /' "$new/auto-allow.txt"
         while read -r name fam kind tag; do say "  set $name ($kind): $(count_lines "$new/sets/$name") entries"; done <"$new/sets.txt"
         if [[ -f "$new/ruleset.nft" ]]; then grep -v '^add element' "$new/ruleset.nft"; say "(+ $(grep -c '^add element' "$new/ruleset.nft" || true) element chunks)"; fi
@@ -2049,7 +2034,7 @@ apply_pipeline() {
             return 1
         fi
     fi
-    ok "rules applied: backend=$BACKEND$([[ $BACKEND == nft ]] && echo "($NFT_FAMILY)") $(family_label "$IPV4_ON" "$IPV6_ON") mode=${CFG[MODE]} egress=$( [[ -s $APPLIED_DIR/egress.txt ]] && paste -sd' ' "$APPLIED_DIR/egress.txt" || echo all)"
+    ok "rules applied: backend=$BACKEND$([[ $BACKEND == nft ]] && echo "($NFT_FAMILY)") $(family_label "$IPV4_ON" "$IPV6_ON") egress=$( [[ -s $APPLIED_DIR/egress.txt ]] && paste -sd' ' "$APPLIED_DIR/egress.txt" || echo all)"
     return 0
 }
 
@@ -2181,7 +2166,7 @@ do_install() {
     config_write
     install_binary
     select_backend
-    info "backend: $BACKEND$([[ $BACKEND == nft ]] && echo " ($NFT_FAMILY)")$([[ $BACKEND != nft ]] && echo " (iptables $(iptables_variant))"), $(family_label "$IPV4_ON" "$IPV6_ON"), mode: ${CFG[MODE]}"
+    info "backend: $BACKEND$([[ $BACKEND == nft ]] && echo " ($NFT_FAMILY)")$([[ $BACKEND != nft ]] && echo " (iptables $(iptables_variant))"), $(family_label "$IPV4_ON" "$IPV6_ON")"
     local c; while read -r c; do [[ -n "$c" ]] && warn "$c"; done < <(detect_conflicts)
     update_sources || true
     if ! apply_pipeline "$confirm"; then
@@ -2204,7 +2189,7 @@ cmd_install() {
     if [[ $INTERACTIVE -eq 1 && $ASSUME_YES -eq 0 ]]; then
         say "This will install Abuse Defender v$AD_VERSION:"
         say "  - script: ${INSTALL_BIN#"$R"}, config: ${CONF_FILE#"$R"}"
-        say "  - outbound rules for: ${CFG[CATEGORIES]}${CFG[GEO_COUNTRIES]:+, countries: ${CFG[GEO_COUNTRIES]}} (mode: ${CFG[MODE]})"
+        say "  - outbound DROP rules for: ${CFG[CATEGORIES]}${CFG[GEO_COUNTRIES]:+, countries: ${CFG[GEO_COUNTRIES]}}"
         say "  - boot restore + periodic checks + automatic list updates"
         legacy_detect && say "  - replace the old v1 setup (cron script, hosts lines, chains)"
         ask_yes_no "Continue?" y || { info "cancelled"; return 0; }
@@ -2324,6 +2309,8 @@ cmd_ensure() {
     [[ -f "$CONF_FILE" ]] || return 0
     lock_acquire 300
     legacy_detect && [[ -f "$INSTALL_BIN" ]] && legacy_cleanup
+    # drop settings that no longer exist (IP_FAMILY, MODE, ...) so the notice is shown once
+    [[ $CONFIG_OBSOLETE -eq 1 ]] && config_write
     if [[ ${CFG[ENABLED]} != yes ]]; then
         if [[ -n "$(nft_tables_ours 2>/dev/null)" ]] || { have iptables && [[ -n "$(ipt_our_chains 4)" ]]; }; then
             teardown_rules; rm -rf -- "$APPLIED_DIR"; hosts_apply no
@@ -2428,6 +2415,42 @@ cmd_category() {   # category NAME on|off
     fi
 }
 
+# ips_in_prefixes FAM LISTFILE < "addr label" lines -> prints the lines whose addr lies
+# inside any prefix of LISTFILE (canonical "addr/len" entries of family FAM)
+ips_in_prefixes() {
+    local fam=$1 list=$2
+    if [[ $fam == 4 ]]; then
+        awk 'function n(a,  o){ split(a,o,"."); return o[1]*16777216+o[2]*65536+o[3]*256+o[4] }
+             NR==FNR { split($1,c,"/"); s=n(c[1]); S[NR]=s; E[NR]=s+2^(32-c[2])-1; m=NR; next }
+             { split($1,c,"/"); x=n(c[1]); for (i=1;i<=m;i++) if (x>=S[i] && x<=E[i]) { print; break } }' "$list" -
+    else
+        awk 'function hv(s,  i,v){ v=0; for(i=1;i<=length(s);i++) v=v*16+index("0123456789abcdef",substr(s,i,1))-1; return v }
+             function parse(a,  i,h,t,hn,tn,k,d,hd,tl){ d=index(a,"::")
+               if (d) { hd=substr(a,1,d-1); tl=substr(a,d+2); hn=(hd=="")?0:split(hd,h,":"); tn=(tl=="")?0:split(tl,t,":")
+                 k=0; for(i=1;i<=hn;i++) G[k++]=hv(h[i]); for(i=0;i<8-hn-tn;i++) G[k++]=0; for(i=1;i<=tn;i++) G[k++]=hv(t[i]) }
+               else { split(a,h,":"); for(i=1;i<=8;i++) G[i-1]=hv(h[i]) } }
+             function key(p,  i,b,v,r){ r=""; for(i=0;i<8;i++){ b=p-16*i; v=G[i]; if(b<=0) v=0; else if(b<16) v=int(v/2^(16-b))*2^(16-b); r=r v ":" } return r p }
+             NR==FNR { split($1,c,"/"); parse(c[1]); L[c[2]+0]=1; K[key(c[2]+0)]=1; next }
+             { split($1,c,"/"); parse(c[1]); for (q in L) if (key(q+0) in K) { print; break } }' "$list" -
+    fi
+}
+
+# what would cut this server off if the country were blocked: gateway, DNS, SSH clients
+geo_conflicts() {   # geo_conflicts CC -> prints "addr reason" lines inside the country lists
+    local cc=$1 f
+    tmp_init
+    {
+        detect_gateways | grep -v '^fe80' | sed 's/$/ default-gateway/'
+        detect_dns | sed 's/%.*//' | grep -v -e '^127\.' -e '^::1$' -e '^fe80' | sed 's/$/ dns-resolver/'
+        detect_ssh_clients | sed 's/$/ ssh-client/'
+    } 2>/dev/null | { awk -v keep=1 -v want=any -v policy=none -v strict=0 "$AWK_NORMALIZE" 2>/dev/null || true; } | sort -u >"$TMP_ROOT/geo-own" || true
+    for f in $(active_fams); do
+        [[ -s "$CACHE_DIR/geo-$cc-v$f.txt" ]] || continue
+        normalize_list "$f" none 0 <"$CACHE_DIR/geo-$cc-v$f.txt" 2>/dev/null >"$TMP_ROOT/geo-list" || true
+        awk -v f="$f" '(f==4 && $1 !~ /:/) || (f==6 && $1 ~ /:/)' "$TMP_ROOT/geo-own" | ips_in_prefixes "$f" "$TMP_ROOT/geo-list"
+    done
+}
+
 cmd_geo() {   # geo add|remove|list CC
     require_root
     local op=${1:-list} cc=${2:-}
@@ -2436,26 +2459,55 @@ cmd_geo() {   # geo add|remove|list CC
     add|remove) [[ "${cc,,}" =~ ^[a-z]{2}$ ]] || die "country must be a 2-letter ISO code (e.g. ir)"; cc="${cc,,}" ;;
     *) die "usage: geo add|remove|list [CC]" ;;
     esac
+    if [[ $op == remove ]]; then
+        lock_acquire
+        config_checkpoint
+        config_list_del GEO_COUNTRIES "$cc"; config_write
+        ok "country $cc removed"
+        if active_install; then select_backend; apply_or_revert yes; fi
+        return 0
+    fi
+    # add: download, count, check that we do not cut ourselves off, confirm, apply
+    # shellcheck disable=SC2086
+    if word_in "$cc" ${CFG[GEO_COUNTRIES]}; then info "country $cc is already blocked"; return 0; fi
+    [[ -f "$CONF_FILE" && ${CFG[ENABLED]} == yes ]] || die "install and enable protection first (abuse-defender install)"
     lock_acquire
     config_checkpoint
-    if [[ $op == add ]]; then config_list_add GEO_COUNTRIES "$cc"; else config_list_del GEO_COUNTRIES "$cc"; fi
-    config_write
-    if active_install; then
-        select_backend
-        if [[ $op == add ]]; then
-            local -a srcs=()
-            local f
-            for f in $(active_fams); do srcs+=("geo-$cc-v$f"); done
-            update_sources "${srcs[@]}" || true
-            local have_data=0
-            for f in $(active_fams); do [[ -s "$CACHE_DIR/geo-$cc-v$f.txt" ]] && have_data=1; done
-            if [[ $have_data -eq 0 ]]; then
-                config_list_del GEO_COUNTRIES "$cc"; config_write
-                die "could not download a valid list for '$cc' - not enabled"
-            fi
+    select_backend
+    local -a srcs=()
+    local f n4=0 n6=0 have_data=0
+    for f in $(active_fams); do srcs+=("geo-$cc-v$f"); done
+    update_sources "${srcs[@]}" || true
+    for f in $(active_fams); do
+        if [[ -s "$CACHE_DIR/geo-$cc-v$f.txt" ]]; then
+            have_data=1
+            if [[ $f == 4 ]]; then n4="$(count_lines "$CACHE_DIR/geo-$cc-v4.txt")"; else n6="$(count_lines "$CACHE_DIR/geo-$cc-v6.txt")"; fi
         fi
-        apply_or_revert yes
+    done
+    [[ $have_data -eq 1 ]] || die "could not download a valid list for '$cc' - country blocking NOT enabled"
+    local conflicts
+    conflicts="$(geo_conflicts "$cc")"
+    if [[ -n "$conflicts" ]]; then
+        warn "these addresses this server depends on are inside the '${cc^^}' prefixes:"
+        printf '%s\n' "$conflicts" | sed 's/^/    /' >&2
+        if [[ $FORCE -eq 0 ]]; then
+            die "refusing to block '${cc^^}': it would cut off your gateway/DNS/SSH session (override with --force)"
+        fi
+        warn "--force given: continuing anyway (the auto-whitelist still exempts these addresses)"
     fi
+    local msg v6txt=""
+    [[ $IPV6_ON -eq 1 ]] && v6txt=" + $n6 IPv6"
+    msg="This blocks ALL outbound traffic to ${cc^^}: $n4 IPv4$v6txt prefixes. Services hosted there become unreachable from this server."
+    if [[ $DRY_RUN -eq 1 ]]; then info "[dry-run] $msg"; return 0; fi
+    if [[ $ASSUME_YES -eq 0 ]]; then
+        if [[ $INTERACTIVE -ne 1 ]]; then die "$msg Re-run with --yes to confirm."; fi
+        say "$msg"
+        ask_yes_no "Block ${cc^^}?" n || { info "cancelled - nothing changed"; return 0; }
+    else
+        info "$msg"
+    fi
+    config_list_add GEO_COUNTRIES "$cc"; config_write
+    if apply_or_revert yes; then ok "country ${cc^^} blocked"; else return 1; fi
 }
 
 MODULE_KEYS="smtp:BLOCK_SMTP ports:BLOCK_PORTS scanguard:SCAN_GUARD forward:APPLY_FORWARD logging:LOG_BLOCKED hosts:HOSTS_BLOCK stateful:STATEFUL autowhitelist:AUTO_WHITELIST sshprotect:PROTECT_SSH_CLIENT updates:UPDATE_ENABLED"
@@ -2478,39 +2530,6 @@ cmd_module() {   # module NAME on|off  | module (list)
     if [[ $key == UPDATE_ENABLED ]]; then [[ -f "$INSTALL_BIN" ]] && persist_install; return 0; fi
     if [[ $key == HOSTS_BLOCK ]]; then hosts_apply "${CFG[HOSTS_BLOCK]}"; return 0; fi
     if active_install; then select_backend; apply_or_revert yes; fi
-}
-
-cmd_mode() {   # mode enforce|monitor
-    require_root
-    local m=${1:-}
-    if [[ -z "$m" ]]; then say "mode: ${CFG[MODE]}"; return 0; fi
-    [[ $m =~ ^(enforce|monitor)$ ]] || die "usage: mode enforce|monitor"
-    lock_acquire
-    config_checkpoint
-    config_set MODE "$m"; config_write
-    if [[ $m == monitor ]]; then
-        ok "monitor mode: matching traffic is only counted and logged (AD-MON), nothing is dropped"
-    else
-        ok "enforce mode: matching traffic is dropped"
-    fi
-    if active_install; then select_backend; apply_or_revert yes; fi
-}
-
-cmd_family() {   # family both|4|6
-    require_root
-    local f=${1:-}
-    if [[ -z "$f" ]]; then say "IP family: ${CFG[IP_FAMILY]}"; return 0; fi
-    case $f in both|4|6) ;; v4|ipv4) f=4 ;; v6|ipv6) f=6 ;; *) die "usage: family both|4|6" ;; esac
-    lock_acquire
-    config_checkpoint
-    if [[ $f == 6 ]] && ! ipv6_available; then die "this host has no working IPv6 - IPv6-only mode refused"; fi
-    config_set IP_FAMILY "$f"; config_write
-    ok "IP family: $f"
-    if active_install; then
-        select_backend
-        update_sources || true
-        apply_or_revert yes
-    fi
 }
 
 cmd_set() {   # set KEY VALUE (generic, for automation)
@@ -2584,7 +2603,7 @@ cmd_uninstall() {
 
 human_bytes() { awk -v b="${1:-0}" 'BEGIN { split("B KiB MiB GiB TiB",u," "); i=1; while (b>=1024 && i<5) { b/=1024; i++ } printf (i==1?"%d %s":"%.1f %s"), b, u[i] }'; }
 
-counters() {   # prints "tag packets bytes" (matches; in monitor mode = would have been dropped)
+counters() {   # prints "tag packets bytes"
     local dir=$APPLIED_DIR b fam
     b="$(meta_get "$dir" backend)"
     case $b in
@@ -2633,21 +2652,20 @@ last_update_str() {
     else printf 'never'; fi
 }
 
-status_line() {   # one line: protected | backend | families | mode | updated | timer
+status_line() {   # one line: protected | backend | families | updated | timer
     local prot="${C_RED}NO${C_OFF}" bk="-" famtxt="-"
     if [[ ! -f "$CONF_FILE" ]]; then prot="${C_RED}NO (not installed)${C_OFF}"
     elif [[ ${CFG[ENABLED]} != yes ]]; then prot="${C_YEL}NO (disabled)${C_OFF}"
     elif [[ $IS_ROOT -eq 1 && -f "$APPLIED_DIR/meta" ]] && rules_live 2>/dev/null; then
         prot="${C_GRN}YES${C_OFF}"
-        [[ "$(meta_get "$APPLIED_DIR" mode)" == monitor ]] && prot="${C_YEL}MONITOR ONLY${C_OFF}"
     fi
     if [[ -f "$APPLIED_DIR/meta" ]]; then
         bk="$(meta_get "$APPLIED_DIR" backend)"
         [[ $bk == nft ]] && bk="nft/$(meta_get "$APPLIED_DIR" nft_family)"
         famtxt="$(family_label "$(meta_get "$APPLIED_DIR" ipv4)" "$(meta_get "$APPLIED_DIR" ipv6)")"
     fi
-    printf 'Protected: %s | backend: %s | %s | mode: %s | updated: %s | timer: %s\n' \
-        "$prot" "$bk" "$famtxt" "${CFG[MODE]}" "$(last_update_str)" "$(timer_state)"
+    printf 'Protected: %s | backend: %s | %s | updated: %s | timer: %s\n' \
+        "$prot" "$bk" "$famtxt" "$(last_update_str)" "$(timer_state)"
 }
 
 cmd_status() {
@@ -2662,18 +2680,14 @@ cmd_status() {
     done <"$APPLIED_DIR/sets.txt"
     say "Ranges     :$s"
     say "Egress     : $( [[ -s $APPLIED_DIR/egress.txt ]] && paste -sd' ' "$APPLIED_DIR/egress.txt" || echo 'all non-loopback interfaces')"
-    say "Settings   : categories='${CFG[CATEGORIES]}' geo='${CFG[GEO_COUNTRIES]}' family=${CFG[IP_FAMILY]}"
+    say "Settings   : categories='${CFG[CATEGORIES]}' geo='${CFG[GEO_COUNTRIES]}'"
     local m line=""
     for m in $MODULE_KEYS; do line="$line ${m%%:*}=${CFG[${m#*:}]}"; done
     say "Modules    :$line"
     [[ "$(meta_get "$APPLIED_DIR" backend)" != nft ]] && say "iptables   : $(iptables_variant)"
     if [[ $IS_ROOT -eq 1 ]]; then
         say ""
-        if [[ "$(meta_get "$APPLIED_DIR" mode)" == monitor ]]; then
-            say "Matching packets per category (monitor mode: counted, NOT dropped):"
-        else
-            say "Blocked packets per category (since rules were loaded):"
-        fi
+        say "Blocked packets per category (since rules were loaded):"
         local p b
         while read -r tag p b; do printf '  %-20s %10s pkts  %s\n' "$tag" "$p" "$(human_bytes "$b")"; done < <(counters | sort)
     fi
@@ -2724,20 +2738,19 @@ cmd_hits() {   # hits [N]
     local log="$TMP_ROOT/hits"
     : >"$log"
     if have journalctl && journalctl -k -n 1 >/dev/null 2>&1; then
-        { journalctl -k -o cat --no-pager -n 200000 2>/dev/null || true; } | grep -E 'AD-(DROP|MON)' >"$log" || true; src="journalctl -k"
+        { journalctl -k -o cat --no-pager -n 200000 2>/dev/null || true; } | grep -F 'AD-DROP' >"$log" || true; src="journalctl -k"
     fi
     if [[ ! -s "$log" ]]; then
         for f in "$R/var/log/kern.log" "$R/var/log/messages" "$R/var/log/syslog"; do
-            [[ -r "$f" ]] && { grep -E 'AD-(DROP|MON)' "$f" >"$log" 2>/dev/null || true; src="$f"; [[ -s "$log" ]] && break; }
+            [[ -r "$f" ]] && { grep -F 'AD-DROP' "$f" >"$log" 2>/dev/null || true; src="$f"; [[ -s "$log" ]] && break; }
         done
     fi
-    if [[ ! -s "$log" ]] && have dmesg; then { dmesg 2>/dev/null || true; } | grep -E 'AD-(DROP|MON)' >"$log" || true; src=dmesg; fi
+    if [[ ! -s "$log" ]] && have dmesg; then { dmesg 2>/dev/null || true; } | grep -F 'AD-DROP' >"$log" || true; src=dmesg; fi
     if [[ ! -s "$log" ]]; then
         say "No blocked-packet log lines found (LOG_BLOCKED=${CFG[LOG_BLOCKED]}). Counters: abuse-defender status"
         return 0
     fi
     say "Source: $src  ($(count_lines "$log") log lines, rate-limited to ${CFG[LOG_RATE]}/min per rule)"
-    grep -q 'AD-MON' "$log" && say "Lines tagged AD-MON come from monitor mode: that traffic was NOT dropped."
     top() {
         local title=$1 field=$2
         say ""; say "Top $title:"
@@ -2745,7 +2758,7 @@ cmd_hits() {   # hits [N]
             sort | uniq -c | sort -rn | head -n "$n" | awk '{printf "  %8d  %s\n", $1, $2}'
     }
     say ""; say "By category:"
-    sed -nE 's/.*AD-(DROP|MON) ?([^:]*):.*/\2/p' "$log" | sort | uniq -c | sort -rn | awk '{printf "  %8d  %s\n", $1, ($2==""?"(generic)":$2)}'
+    sed -nE 's/.*AD-DROP ?([^:]*):.*/\1/p' "$log" | sort | uniq -c | sort -rn | awk '{printf "  %8d  %s\n", $1, ($2==""?"(generic)":$2)}'
     top "destinations" DST
     top "destination ports" DPT
     top "local users (UID) - who is sending it" UID
@@ -2848,7 +2861,7 @@ cmd_doctor() {
     if have ipset; then d_info "ipset installed"; fi
     local sel
     if sel="$(select_backend 2>&1 >/dev/null && printf 'backend=%s%s, %s' "$BACKEND" "${NFT_FAMILY:+/$NFT_FAMILY}" "$(family_label "$IPV4_ON" "$IPV6_ON")")"; then
-        d_ok "selected: $sel (BACKEND=${CFG[BACKEND]}, IP_FAMILY=${CFG[IP_FAMILY]})"
+        d_ok "selected: $sel (BACKEND=${CFG[BACKEND]})"
         select_backend >/dev/null 2>&1
         tmp_init
         if bundle_build "$TMP_ROOT/doctor" >/dev/null 2>&1; then
@@ -2891,7 +2904,7 @@ cmd_doctor() {
     if ipv6_available; then
         if have ip && ip -6 route show default 2>/dev/null | grep -q .; then d_ok "IPv6 available with a default route"
         else d_info "IPv6 enabled in the kernel but no IPv6 default route"; fi
-    else d_info "no IPv6 on this host (IP_FAMILY=6 is not possible)"; fi
+    else d_info "no IPv6 on this host - only IPv4 is filtered"; fi
 
     say ""; say "Protection"
     if [[ -f "$CONF_FILE" ]]; then d_ok "installed (config ${CONF_FILE#"$R"})"; else d_warn "not installed - run: abuse-defender install"; fi
@@ -2901,8 +2914,7 @@ cmd_doctor() {
         else d_info "program ${INSTALL_BIN#"$R"} is v${iv:-?}, this script is v$AD_VERSION"; fi
     fi
     if [[ -f "$CONF_FILE" ]]; then
-        [[ ${CFG[ENABLED]} == yes ]] && d_ok "enabled (mode: ${CFG[MODE]})" || d_warn "protection is disabled (ENABLED=no)"
-        [[ ${CFG[MODE]} == monitor ]] && d_warn "monitor mode: nothing is dropped, traffic is only counted/logged"
+        [[ ${CFG[ENABLED]} == yes ]] && d_ok "protection enabled" || d_warn "protection is disabled (ENABLED=no) - enable it with: abuse-defender enable"
         if [[ -f "$APPLIED_DIR/meta" ]]; then
             if rules_live; then d_ok "rules are loaded in the kernel"
             else d_fail "rules are NOT loaded (another tool removed them?) - run: abuse-defender apply"; fi
@@ -3017,10 +3029,8 @@ Allow and block
 
 Settings
   category <name> on|off  bogons | abuse | spamhaus | feodo
-  geo add|remove|list CC  outbound country blocking, e.g. 'geo add ir'
+  geo add|remove|list CC  outbound country blocking, e.g. 'geo add ir' (asks first; --yes to confirm)
   module [name on|off]    smtp ports scanguard forward logging hosts stateful autowhitelist sshprotect updates
-  family both|4|6         protect IPv4+IPv6, IPv4 only or IPv6 only
-  mode enforce|monitor    monitor = count and log what would be blocked, drop nothing
   set KEY VALUE           change any setting (see 'config')
   config                  print the effective settings
 
@@ -3039,8 +3049,8 @@ Options
   -y, --yes               assume yes (non-interactive; also skips the keep-rules prompt)
   -n, --dry-run           show what would happen, change nothing
   -q, --quiet             only warnings and errors
-      --force             accept lists that shrank a lot
-      --family=both|4|6   address families for this run (--no-ipv6 = --family=4)
+      --force             accept lists that shrank a lot; block a country that contains
+                          your gateway/DNS/SSH client (not recommended)
       --backend=B         auto | nft | ipset | iptables (this run)
       --confirm-timeout=N seconds to confirm risky changes before auto-rollback
       --no-confirm        apply without the interactive keep-rules prompt
@@ -3053,8 +3063,7 @@ Examples
   bash <(curl -s https://raw.githubusercontent.com/$AD_REPO/main/abuse-defender.sh)
   abuse-defender install --yes
   abuse-defender whitelist 10.10.0.0/16
-  abuse-defender mode monitor        # try it out first, then: abuse-defender mode enforce
-  abuse-defender geo add ir
+  abuse-defender --yes geo add ir
   abuse-defender doctor
   abuse-defender uninstall --yes
 EOF
@@ -3175,68 +3184,6 @@ menu_modules() {
     done
 }
 
-menu_family() {
-    local ch
-    say ""; say "IP family - currently: ${CFG[IP_FAMILY]}"
-    say "  1) both  - IPv4 and IPv6 (IPv6 only if the host has it)"
-    say "  2) 4     - IPv4 only (IPv6 traffic is not filtered)"
-    say "  3) 6     - IPv6 only (IPv4 traffic is not filtered)"
-    say "  0) back"
-    menu_choice ch 3 || return 0
-    case $ch in 1) menu_run cmd_family both ;; 2) menu_run cmd_family 4 ;; 3) menu_run cmd_family 6 ;; esac
-}
-
-menu_mode() {
-    local ch
-    say ""; say "Mode - currently: ${CFG[MODE]}"
-    say "  1) enforce - drop matching traffic"
-    say "  2) monitor - only count and log what would be dropped (try before enforcing)"
-    say "  0) back"
-    menu_choice ch 2 || return 0
-    case $ch in 1) menu_run cmd_mode enforce ;; 2) menu_run cmd_mode monitor ;; esac
-}
-
-menu_settings() {
-    local ch key val re
-    while true; do
-        say ""; say "Mirrors and other settings"
-        say "  1) show all settings"
-        say "  2) change download mirrors"
-        say "  3) reset mirrors to the defaults"
-        say "  4) change any setting"
-        say "  0) back"
-        menu_choice ch 4 || return 0
-        case $ch in
-        0) return 0 ;;
-        1) cmd_config ;;
-        2)
-            say "Current: ${CFG[MIRRORS]}"
-            while true; do
-                prompt val "Space-separated https:// base URLs (empty = cancel): " || return 0
-                [[ -z "$val" ]] && break
-                re="$(config_regex MIRRORS)"
-                if [[ "$val" =~ $re ]]; then menu_run cmd_set MIRRORS "$val"; break; fi
-                warn "invalid: use https:// URLs separated by spaces"
-            done ;;
-        3) menu_run cmd_set MIRRORS "$DEFAULT_MIRRORS" ;;
-        4)
-            while true; do
-                prompt key "Setting name (see 'show all settings', empty = cancel): " || return 0
-                key="${key//[[:space:]]/}"; key="${key^^}"
-                [[ -z "$key" ]] && break
-                if ! re="$(config_regex "$key")"; then warn "unknown setting '$key'"; continue; fi
-                say "Current value: ${CFG[$key]}"
-                while true; do
-                    prompt val "New value for $key: " || return 0
-                    if [[ "$val" =~ $re ]]; then menu_run cmd_set "$key" "$val"; break; fi
-                    warn "invalid value for $key"
-                done
-                break
-            done ;;
-        esac
-    done
-}
-
 menu_export_import() {
     local ch f
     say ""; say "Export / import settings (config, whitelist, custom blocks, extra domains)"
@@ -3258,59 +3205,59 @@ menu_export_import() {
 
 menu_main() {
     INTERACTIVE=1
-    local ch ip
+    local ch ip toggle
     while true; do
         menu_header
+        if [[ -f "$CONF_FILE" && ${CFG[ENABLED]} == yes ]]; then toggle="Disable protection (keeps settings)"
+        else toggle="Enable protection"; fi
         say ""
         say " Protection"
         say "   1) Install / re-apply protection"
         say "   2) Update lists now"
         say "   3) Status and counters"
-        say "   4) Doctor (diagnose problems)"
-        say "   5) Preview rules without applying (dry-run)"
+        say "   4) $toggle"
+        say "   5) Doctor (diagnose problems)"
+        say "   6) Preview rules without applying (dry-run)"
         say " Allow and block"
-        say "   6) Whitelist an IP/range            7) Remove a whitelisted IP/range"
-        say "   8) Block an IP/range                9) Unblock an IP/range"
+        say "   7) Whitelist an IP/range            8) Remove a whitelisted IP/range"
+        say "   9) Block an IP/range               10) Unblock an IP/range"
         say " Settings"
-        say "  10) Block categories                11) Country blocking"
-        say "  12) Optional modules                13) IP family (both / IPv4 / IPv6)"
-        say "  14) Mode (enforce / monitor)        15) Mirrors and other settings"
+        say "  11) Block categories               12) Country blocking"
+        say "  13) Optional modules"
         say " Tools"
-        say "  16) Blocked-connections log         17) Export / import settings"
-        say "  18) Enable / disable protection     19) Uninstall completely"
+        say "  14) Blocked-connections log        15) Show settings"
+        say "  16) Export / import settings       17) Uninstall completely"
         say "   0) Exit"
-        menu_choice ch 19 || { say ""; return 0; }
+        menu_choice ch 17 || { say ""; return 0; }
         case $ch in
         0) say "Bye."; return 0 ;;
         1) menu_run cmd_install; pause ;;
         2) if [[ -f "$CONF_FILE" ]]; then menu_run cmd_update; else warn "install first (option 1)"; fi; pause ;;
         3) menu_run cmd_status; pause ;;
-        4) menu_run cmd_doctor; pause ;;
-        5) if [[ -f "$CONF_FILE" ]]; then
+        4) if [[ ! -f "$CONF_FILE" ]]; then warn "install first (option 1)"
+           elif [[ ${CFG[ENABLED]} == yes ]]; then menu_run cmd_disable
+           else menu_run cmd_enable; fi; pause ;;
+        5) menu_run cmd_doctor; pause ;;
+        6) if [[ -f "$CONF_FILE" ]]; then
                ( DRY_RUN=1; menu_run cmd_apply )
            else
                ( DRY_RUN=1; menu_run cmd_install )
            fi; pause ;;
-        6) say "Current whitelist:"; cmd_list whitelist | sed 's/^/  /'
-           menu_ip ip allow && menu_run cmd_entries add allow "$ip"; pause ;;
         7) say "Current whitelist:"; cmd_list whitelist | sed 's/^/  /'
+           menu_ip ip allow && menu_run cmd_entries add allow "$ip"; pause ;;
+        8) say "Current whitelist:"; cmd_list whitelist | sed 's/^/  /'
            menu_ip ip allow && menu_run cmd_entries del allow "$ip"; pause ;;
-        8) say "Current custom blocks:"; cmd_list custom | sed 's/^/  /'
-           menu_ip ip block && menu_run cmd_entries add block "$ip"; pause ;;
         9) say "Current custom blocks:"; cmd_list custom | sed 's/^/  /'
-           menu_ip ip block && menu_run cmd_entries del block "$ip"; pause ;;
-        10) menu_categories ;;
-        11) menu_geo ;;
-        12) menu_modules ;;
-        13) menu_family; pause ;;
-        14) menu_mode; pause ;;
-        15) menu_settings ;;
-        16) menu_run cmd_hits; pause ;;
-        17) menu_export_import; pause ;;
-        18) if [[ ! -f "$CONF_FILE" ]]; then warn "install first (option 1)"
-            elif [[ ${CFG[ENABLED]} == yes ]]; then menu_run cmd_disable
-            else menu_run cmd_enable; fi; pause ;;
-        19) menu_run cmd_uninstall; pause ;;
+           menu_ip ip block && menu_run cmd_entries add block "$ip"; pause ;;
+        10) say "Current custom blocks:"; cmd_list custom | sed 's/^/  /'
+            menu_ip ip block && menu_run cmd_entries del block "$ip"; pause ;;
+        11) menu_categories ;;
+        12) menu_geo ;;
+        13) menu_modules ;;
+        14) menu_run cmd_hits; pause ;;
+        15) cmd_config; pause ;;
+        16) menu_export_import; pause ;;
+        17) menu_run cmd_uninstall; pause ;;
         esac
     done
 }
@@ -3326,8 +3273,6 @@ main() {
         -n|--dry-run) DRY_RUN=1 ;;
         -q|--quiet) QUIET=1 ;;
         --force) FORCE=1 ;;
-        --no-ipv6) OPT_NO_IPV6=1 ;;
-        --family=*) OPT_FAMILY="${1#*=}"; [[ $OPT_FAMILY =~ ^(both|4|6)$ ]] || die "invalid --family (both|4|6)" ;;
         --backend=*) OPT_BACKEND="${1#*=}"; [[ $OPT_BACKEND =~ ^(auto|nft|ipset|iptables)$ ]] || die "invalid --backend" ;;
         --backend) shift; OPT_BACKEND="${1:-}"; [[ $OPT_BACKEND =~ ^(auto|nft|ipset|iptables)$ ]] || die "invalid --backend" ;;
         --confirm-timeout=*) OPT_CONFIRM_TIMEOUT="${1#*=}"; [[ $OPT_CONFIRM_TIMEOUT =~ ^[0-9]+$ ]] || die "invalid --confirm-timeout" ;;
@@ -3367,7 +3312,7 @@ main() {
 
     # replace v1 setups / older versions automatically (new rules first, then removal)
     case $cmd in
-    ""|menu|apply|update|enable|block|unblock|whitelist|allow|unwhitelist|unallow|category|geo|module|modules|family|mode|set|import|restore)
+    ""|menu|apply|update|enable|block|unblock|whitelist|allow|unwhitelist|unallow|category|geo|module|modules|set|import|restore)
         if [[ $IS_ROOT -eq 1 ]]; then
             auto_replace_old
             if [[ ${#REPORT[@]} -gt 0 ]]; then config_load; apply_runtime_config; fi
@@ -3395,8 +3340,6 @@ main() {
     category) cmd_category "$@" ;;
     geo) cmd_geo "$@" ;;
     module|modules) cmd_module "$@" ;;
-    family) cmd_family "$@" ;;
-    mode) cmd_mode "$@" ;;
     set) cmd_set "$@" ;;
     config) cmd_config ;;
     hits) cmd_hits "$@" ;;
