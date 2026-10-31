@@ -1,0 +1,9 @@
+# Abuse Defender - cloud infrastructure addresses that are ALWAYS allowed (AUTO_WHITELIST=yes)
+# They sit inside blocked bogon ranges but are required by the platform (metadata, DNS, NTP).
+# Each entry is documented by the provider (URLs in lists/SOURCES.md).
+100.100.2.136/32      # Alibaba Cloud internal DNS
+100.100.2.138/32      # Alibaba Cloud internal DNS
+100.100.100.200/32    # Alibaba Cloud ECS instance metadata
+169.254.169.123/32    # AWS Time Sync Service (NTP)
+169.254.169.253/32    # AWS Route 53 Resolver (VPC DNS)
+169.254.169.254/32    # Instance metadata: AWS, GCP, Azure, Oracle (also OCI DNS), DigitalOcean, Hetzner, Vultr, OpenStack

@@ -1,0 +1,6 @@
+# Abuse Defender - IPv6 cloud infrastructure addresses that are ALWAYS allowed (AUTO_WHITELIST=yes)
+# They are inside fc00::/7 (Unique-Local) which the bogon list blocks.
+fd00:ec2::123/128     # AWS Time Sync Service (Nitro)
+fd00:ec2::253/128     # AWS Route 53 Resolver (Nitro)
+fd00:ec2::254/128     # AWS Instance Metadata Service (Nitro)
+fd20:ce::254/128      # Google Compute Engine metadata server (IPv6-only instances)

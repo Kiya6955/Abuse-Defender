@@ -1,0 +1,5 @@
+# Abuse Defender - domains sinkholed to 127.0.0.1 / ::1 in a managed /etc/hosts block
+# (HOSTS_BLOCK=yes). Carried over from v1. Add extra domains locally in
+# /etc/abuse-defender/domains.txt. One domain per line.
+appclick.co
+pushnotificationws.com
