@@ -1,0 +1,39 @@
+name: Refresh country lists and checksums
+
+# Weekly rebuild of country lists (RIR delegation statistics), abuse-ips.ipv4 and
+# lists/SHA256SUMS. Changes are proposed as a pull request for the maintainer to review;
+# nothing is pushed to main directly.
+on:
+  schedule:
+    - cron: "17 3 * * 1"
+  workflow_dispatch:
+
+permissions:
+  contents: write        # push the refresh branch
+  pull-requests: write   # open the pull request
+
+jobs:
+  refresh:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - name: rebuild
+        run: bash tools/build-lists.sh --geo
+      - name: test
+        run: bash tests/run.sh list_parsing build_lists_check geo
+      - name: open pull request if something changed
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          if git diff --quiet; then echo "no changes"; exit 0; fi
+          branch="auto/refresh-lists-$(date -u +%Y%m%d)"
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git checkout -b "$branch"
+          git add -A lists abuse-ips.ipv4
+          git commit -m "Refresh country lists and checksums ($(date -u +%Y-%m-%d))"
+          git push -f origin "$branch"
+          gh pr create --base main --head "$branch" \
+            --title "Refresh country lists and checksums ($(date -u +%Y-%m-%d))" \
+            --body "Automated rebuild by tools/build-lists.sh --geo (RIR delegation stats). Please review the diff before merging." \
+            || echo "pull request already exists"

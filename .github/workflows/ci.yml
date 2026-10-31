@@ -1,0 +1,79 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  lint-and-test:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - name: bash -n
+        run: |
+          bash -n abuse-defender.sh
+          bash -n tools/build-lists.sh
+          bash -n tests/run.sh
+      - name: shellcheck
+        run: shellcheck -x -s bash abuse-defender.sh tools/build-lists.sh tests/run.sh tests/stubs/iptables tests/stubs/iptables-restore tests/stubs/ipset tests/stubs/nft tests/stubs/misc.sh tests/stubs/_ipt_lib.sh
+      - name: list validation (derived files up to date)
+        run: bash tools/build-lists.sh --check
+      - name: unit / integration tests with stubbed firewall tools
+        run: JOBS=4 bash tests/run.sh
+      - name: tests with mawk (Debian default awk)
+        run: |
+          sudo apt-get install -y -qq mawk
+          mkdir -p /tmp/mawk && ln -sf "$(command -v mawk)" /tmp/mawk/awk
+          AD_TEST_SYSPATH="/tmp/mawk:/usr/bin:/bin" bash tests/run.sh list_parsing build_lists_check install_nft dry_run_output family_modes
+
+  # Real kernel: the runner is a throw-away VM with root, nftables and iptables.
+  real-kernel:
+    runs-on: ubuntu-24.04
+    needs: lint-and-test
+    strategy:
+      fail-fast: false
+      matrix:
+        backend: [nft, ipset, iptables]
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - name: install tools
+        run: sudo apt-get install -y -qq nftables ipset iptables
+      - name: install (${{ matrix.backend }})
+        run: |
+          sudo ./abuse-defender.sh --yes --backend=${{ matrix.backend }} install
+          sudo sed -i 's/^BACKEND=.*/BACKEND="${{ matrix.backend }}"/' /etc/abuse-defender/abuse-defender.conf
+          sudo abuse-defender status
+      - name: idempotency, modules, counters
+        run: |
+          sudo abuse-defender --yes apply
+          sudo abuse-defender --yes module smtp on
+          sudo abuse-defender --yes module scanguard on
+          sudo abuse-defender --yes block 203.0.113.0/24
+          sudo abuse-defender --yes whitelist 10.123.0.0/16
+          sudo abuse-defender ensure
+          sudo abuse-defender status
+          sudo abuse-defender doctor || echo "doctor reported problems (see above)"
+          sudo abuse-defender --yes mode monitor
+          sudo abuse-defender --yes mode enforce
+          sudo abuse-defender --yes family 4
+          sudo abuse-defender --yes family both
+          # the host must still reach the internet
+          curl -fsS -o /dev/null https://github.com
+          # and traffic to a bogon must be dropped (times out instead of connecting)
+          if timeout 5 bash -c 'exec 3<>/dev/tcp/10.255.255.1/80'; then echo "bogon reachable?!"; exit 1; fi
+          sudo nft list ruleset || true
+          sudo iptables -S || true
+      - name: uninstall leaves nothing behind
+        run: |
+          sudo abuse-defender --yes uninstall
+          ! sudo nft list tables | grep -q abuse_defender
+          ! sudo iptables -S | grep -q abuse-defender
+          ! sudo ip6tables -S | grep -q abuse-defender
+          ! (sudo ipset list -n 2>/dev/null | grep -q '^ad[46]-')
+          ! grep -q abuse-defender /etc/hosts
+          test ! -e /usr/local/sbin/abuse-defender
+          test ! -e /etc/systemd/system/abuse-defender.service

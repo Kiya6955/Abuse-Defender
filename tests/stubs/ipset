@@ -1,0 +1,47 @@
+#!/usr/bin/env bash
+# Test stub for ipset: one file per set in $AD_FAKE/ipset/ (first line = "type family").
+D="$AD_FAKE/ipset"; mkdir -p "$D"
+printf 'ipset %s\n' "$*" >>"$AD_FAKE/calls.log"
+
+referenced() { grep -Eqs -- "(--match-set|--add-set) $1 " "$AD_FAKE"/ipt4.state "$AD_FAKE"/ipt6.state; }
+
+do_cmd() {
+    local cmd=$1; shift
+    case $cmd in
+    create)
+        local name=$1 type=$2 fam=inet exist=0 a
+        shift 2
+        for a in "$@"; do [[ $a == -exist ]] && exist=1; done
+        [[ " $* " == *" family inet6 "* ]] && fam=inet6
+        if [[ -f "$D/$name" ]]; then [[ $exist -eq 1 ]] && return 0; echo "ipset v7: Set cannot be created: set with the same name already exists" >&2; return 1; fi
+        echo "$type $fam" >"$D/$name" ;;
+    destroy)
+        [[ -f "$D/$1" ]] || { echo "ipset: The set with the given name does not exist" >&2; return 1; }
+        referenced "$1" && { echo "ipset: Set cannot be destroyed: it is in use by a kernel component" >&2; return 1; }
+        rm -f "$D/$1" ;;
+    flush) [[ -f "$D/$1" ]] || return 1; head -n1 "$D/$1" >"$D/$1.t"; mv "$D/$1.t" "$D/$1" ;;
+    add) [[ -f "$D/$1" ]] || return 1; echo "$2" >>"$D/$1" ;;
+    swap)
+        [[ -f "$D/$1" && -f "$D/$2" ]] || { echo "ipset: swap: set missing" >&2; return 1; }
+        mv "$D/$1" "$D/.swap"; mv "$D/$2" "$D/$1"; mv "$D/.swap" "$D/$2" ;;
+    list)
+        if [[ ${1:-} == -n ]]; then
+            local f
+            for f in "$D"/*; do [[ -f "$f" ]] && basename "$f"; done
+            return 0
+        fi
+        cat "$D/$1" ;;
+    *) echo "ipset stub: unsupported $cmd" >&2; return 2 ;;
+    esac
+}
+
+if [[ ${1:-} == restore ]]; then
+    n=0
+    while read -r -a w; do
+        n=$((n + 1))
+        [[ ${#w[@]} -eq 0 ]] && continue
+        do_cmd "${w[@]}" || { echo "ipset v7: Error in line $n" >&2; exit 1; }
+    done
+    exit 0
+fi
+do_cmd "$@"
