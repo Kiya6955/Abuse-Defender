@@ -28,7 +28,7 @@ jobs:
         run: |
           sudo apt-get install -y -qq mawk
           mkdir -p /tmp/mawk && ln -sf "$(command -v mawk)" /tmp/mawk/awk
-          AD_TEST_SYSPATH="/tmp/mawk:/usr/bin:/bin" bash tests/run.sh list_parsing build_lists_check install_nft dry_run_output family_modes
+          AD_TEST_SYSPATH="/tmp/mawk:/usr/bin:/bin" bash tests/run.sh list_parsing build_lists_check install_nft dry_run_output geo_guard
 
   # Real kernel: the runner is a throw-away VM with root, nftables and iptables.
   real-kernel:
@@ -57,10 +57,10 @@ jobs:
           sudo abuse-defender ensure
           sudo abuse-defender status
           sudo abuse-defender doctor || echo "doctor reported problems (see above)"
-          sudo abuse-defender --yes mode monitor
-          sudo abuse-defender --yes mode enforce
-          sudo abuse-defender --yes family 4
-          sudo abuse-defender --yes family both
+          sudo abuse-defender --yes disable
+          sudo abuse-defender --yes enable
+          sudo abuse-defender --yes geo add ir
+          sudo abuse-defender --yes geo remove ir
           # the host must still reach the internet
           curl -fsS -o /dev/null https://github.com
           # and traffic to a bogon must be dropped (times out instead of connecting)

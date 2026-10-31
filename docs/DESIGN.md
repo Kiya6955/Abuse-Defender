@@ -76,11 +76,11 @@ default route is found the tool falls back to "every interface except `lo`" and 
    3  udp 68 -> 67 (DHCPv4) ............... RETURN   255.255.255.255 is inside 240/4
    4  ICMPv6 RS/NS/NA/MLD, DHCPv6 ......... RETURN   IPv6 must keep working
    5  daddr in allow set .................. RETURN   whitelist.txt + gateways + DNS + cloud metadata + SSH clients
-   6  daddr in custom set ................. LOG(rate-limited) + DROP          (*)
+   6  daddr in custom set ................. LOG(rate-limited) + DROP
    7  optional: SMTP ports, scan-target ports ........ LOG + DROP
    8  optional: TCP SYN -> scanguard chain ........... (see §7)
    9  daddr in local set .................. RETURN   directly connected subnets
-  10  daddr in <category> sets ............ LOG(rate-limited) + DROP   bogons, abuse, spamhaus, feodo, geo-XX (*)
+  10  daddr in <category> sets ............ LOG(rate-limited) + DROP   bogons, abuse, spamhaus, feodo, geo-XX
                                          │
    falls off the end → back to OUTPUT, the user's own rules continue normally
 ```
@@ -108,17 +108,12 @@ local user/app produced the blocked traffic. If the kernel or nft version cannot
 logging, logging, or an optional module, the renderer retries at a lower feature level
 (`nft -c` / `iptables-restore --test` decide) and records a note instead of failing.
 
-(*) In **monitor mode** (`MODE=monitor`) every "LOG + DROP" pair becomes "LOG with the
-prefix `AD-MON` + a counting rule without a verdict" (nftables: `counter comment "<cat>"`,
-iptables: a rule without `-j`, plain iptables: the shared drop chain `RETURN`s). The
-traffic continues, the per-category counters and `hits` show what would have been dropped.
-
-**IP families.** `IP_FAMILY=both|4|6` decides which families get sets and rules.
-`both` adds IPv6 only when the host has working IPv6 (`/proc/net/if_inet6`, not
-`disable_ipv6`) and the backend can filter it (nftables `inet` family or ip6tables).
-`6` is refused on hosts without IPv6. With `4` the IPv6 parts (sets, ICMPv6/DHCPv6
-exemptions, scan-guard sets) are not rendered at all, with `6` the IPv4 parts (incl. the
-DHCPv4 exemption) are not rendered.
+**IPv6 is automatic.** IPv4 is always protected. IPv6 sets and rules are added only when
+the host has working IPv6 (`/proc/net/if_inet6` present, `disable_ipv6` not set) and the
+backend can filter it (nftables `inet` family, or ip6tables); otherwise the IPv6 parts
+(sets, ICMPv6/DHCPv6 exemptions, scan-guard sets) are simply not rendered. There is no
+setting for this on purpose: a wrong choice either leaves IPv6 open or tries to filter a
+family the host does not have.
 
 ## 5. Safety model (what can lock you out, and why it does not)
 
@@ -232,14 +227,36 @@ crontab line, the hosts lines) and for an older v2 (installed program with a low
    protection is back exactly as it was;
 4. prints a summary of what was imported and removed (in the menu: under the header).
 
+Settings that no longer exist (`IP_FAMILY`, `MODE`, `IPV6`, `LANGUAGE`) are dropped
+silently when the config is read and the file is rewritten on the next upgrade or
+ensure run; a former `MODE=monitor` prints one line saying that monitor mode no longer
+exists and protection is enforced (use `disable` to switch it off).
+
 A v1 setup whose rules had already been cleared is only tidied up (nothing is
 installed). A newer installed program always wins: an older copy started by hand
 `exec`s the installed one instead of downgrading it.
 
+### Country blocking guard
+
+`geo add <cc>` first downloads the country lists (repository `lists/geo/<cc>-v{4,6}.txt`
+when present - only `ir` is pre-built -, otherwise ipverse/country-ip-blocks, then
+ipdeny), validates them like every other list, and then, before changing anything:
+
+1. checks the default gateways, DNS resolvers and connected SSH clients against the
+   country prefixes (IPv4 by integer range, IPv6 by masked-prefix lookup) and refuses
+   with the offending addresses listed (`--force` overrides; those addresses remain in the
+   allow set, so the override cannot cut them off either);
+2. prints how many IPv4/IPv6 prefixes will be blocked and that services hosted there
+   become unreachable, and asks for confirmation (menu) or requires `--yes` (CLI);
+3. only then adds the code to `GEO_COUNTRIES` and applies through the normal
+   self-test / keep-rules / checkpoint path.
+
+If no valid list can be downloaded, the code is not added. `geo add` needs an installed
+and enabled setup.
+
 ### Settings checkpoint
 
-Interactive changes (whitelist removal, categories, modules, country, family, mode,
-import) checkpoint the settings files first. If the change is rolled back - self-test
+Interactive changes (whitelist removal, categories, modules, country, import) checkpoint the settings files first. If the change is rolled back - self-test
 regression, "no"/timeout at the keep-rules prompt, Ctrl+C - the settings are restored
 too; otherwise the 15-minute ensure timer would silently re-apply the unconfirmed change.
 
@@ -247,11 +264,14 @@ too; otherwise the 15-minute ensure timer would silently re-apply the unconfirme
 
 The menu is a loop (no recursion) over grouped sections; every action runs in a
 subshell, so an error or `die` returns to the menu while the EXIT trap of that subshell
-still performs any pending rollback. Numeric choices, IP/CIDR input, country codes and
-setting values are validated and asked again until they are valid; an empty answer
-cancels; end of input exits. The explicit `menu` command reads answers from stdin when
-it is not a terminal, which is how the test-suite drives it. Colours are used only on a
-terminal and never when `NO_COLOR` is set.
+still performs any pending rollback. Numeric choices, IP/CIDR input and country codes
+are validated and asked again until they are valid; an empty answer cancels; end of
+input exits. Items are numbered 1-17 without gaps; item 4 toggles between "Disable
+protection (keeps settings)" and "Enable protection". Settings are shown read-only
+(item 15); advanced keys such as the download mirrors are edited in the config file or
+with `abuse-defender set KEY VALUE`. The explicit `menu` command reads answers from stdin
+when it is not a terminal, which is how the test-suite drives it. Colours are used only
+on a terminal and never when `NO_COLOR` is set.
 
 ## 11. Domain sinkhole
 

@@ -18,8 +18,9 @@ sensor networks, outbound spam on port 25 and port-scan patterns. It is made for
 servers (Xray/V2Ray/sing-box, OpenVPN, WireGuard) whose users can make the server
 connect anywhere, but works on any server.
 
-It adds **outbound rules only** - it never blocks incoming traffic and never touches
-firewall rules it did not create.
+It adds **outbound DROP rules only** - it never blocks incoming traffic and never touches
+firewall rules it did not create. IPv4 is always protected; IPv6 is protected
+automatically when the server has working IPv6 and skipped safely when it does not.
 
 ## Quick start
 
@@ -52,26 +53,36 @@ removed is printed. If the new rules cannot be applied, the old ones stay in pla
 | Abuse Defender v2.0.0 - outbound abuse protection            |
 | https://github.com/Kiya6955/Abuse-Defender                   |
 +--------------------------------------------------------------+
-Protected: YES | backend: nft/inet | IPv4+IPv6 | mode: enforce | updated: 2026-10-31 12:00 (ok) | timer: systemd update:active ensure:active
+Protected: YES | backend: nft/inet | IPv4+IPv6 | updated: 2026-10-31 12:00 (ok) | timer: systemd update:active ensure:active
 
  Protection
    1) Install / re-apply protection
    2) Update lists now
    3) Status and counters
-   4) Doctor (diagnose problems)
-   5) Preview rules without applying (dry-run)
+   4) Disable protection (keeps settings)
+   5) Doctor (diagnose problems)
+   6) Preview rules without applying (dry-run)
  Allow and block
-   6) Whitelist an IP/range            7) Remove a whitelisted IP/range
-   8) Block an IP/range                9) Unblock an IP/range
+   7) Whitelist an IP/range            8) Remove a whitelisted IP/range
+   9) Block an IP/range               10) Unblock an IP/range
  Settings
-  10) Block categories                11) Country blocking
-  12) Optional modules                13) IP family (both / IPv4 / IPv6)
-  14) Mode (enforce / monitor)        15) Mirrors and other settings
+  11) Block categories               12) Country blocking
+  13) Optional modules
  Tools
-  16) Blocked-connections log         17) Export / import settings
-  18) Enable / disable protection     19) Uninstall completely
+  14) Blocked-connections log        15) Show settings
+  16) Export / import settings       17) Uninstall completely
    0) Exit
 ```
+
+- **1** installs, or re-applies after you edited files by hand.
+- **4** switches between *Disable protection* (removes every rule, keeps all settings)
+  and *Enable protection*. Use it if you want the server unprotected for a while.
+- **5** checks the backend, kernel features, conflicts (ufw, firewalld, Docker),
+  gateway/DNS/mirror reachability, timers and list freshness.
+- **6** shows exactly which rules would be loaded, without changing anything.
+- **11-13** turn categories, countries and modules on and off; every change is applied
+  with the self-test and the keep-rules prompt.
+- **15** prints all effective settings (read-only).
 
 Every input is validated and asked again if it is wrong; Ctrl+C at any point leaves the
 server in a consistent state (unconfirmed changes are rolled back).
@@ -83,22 +94,20 @@ abuse-defender install --yes            # install/upgrade without questions
 abuse-defender status                   # protection, counters, auto-whitelist
 abuse-defender doctor                   # diagnose backend, conflicts, network, timers, lists
 abuse-defender update                   # fetch lists now (the timer does this daily)
+abuse-defender disable                  # remove all rules, keep settings
+abuse-defender enable
 abuse-defender whitelist 10.8.0.0/16    # never block this (e.g. your VPN subnet)
+abuse-defender unwhitelist 10.8.0.0/16
 abuse-defender block 203.0.113.0/24     # always block this
 abuse-defender unblock 203.0.113.0/24
-abuse-defender mode monitor             # only count/log what would be blocked
-abuse-defender mode enforce
-abuse-defender family 4                 # IPv4 only (both | 4 | 6)
-abuse-defender geo add ir               # block outbound traffic to Iran
-abuse-defender category spamhaus on     # Spamhaus DROP list
-abuse-defender module smtp on           # block outbound port 25
-abuse-defender module scanguard on      # rate-limit port-scan behaviour
+abuse-defender category spamhaus on     # bogons | abuse | spamhaus | feodo
+abuse-defender module smtp on           # smtp ports scanguard forward logging hosts ...
+abuse-defender --yes geo add ir         # block outbound traffic to a country
+abuse-defender geo remove ir
 abuse-defender hits                     # who/what was blocked (kernel log)
 abuse-defender --dry-run apply          # show the rules without applying them
-abuse-defender export | import FILE     # save / load your settings
 abuse-defender config                   # print all settings
-abuse-defender set KEY VALUE            # change any setting
-abuse-defender disable | enable
+abuse-defender export | import FILE     # save / load your settings
 abuse-defender uninstall --yes          # remove everything
 abuse-defender --help
 ```
@@ -114,43 +123,42 @@ Exit codes: `0` ok, `1` error, `2` usage, `3` update partially failed (old lists
 | `abuse` category | on | curated ranges of report senders / honeypots (`lists/abuse-v4.txt`; see the risky entries in [lists/SOURCES.md](lists/SOURCES.md)) |
 | `spamhaus` category | off | Spamhaus DROP (hijacked/criminal netblocks), fetched from spamhaus.org |
 | `feodo` category | off | abuse.ch Feodo Tracker botnet C2 IPs (IPv4) |
-| Country blocking | off | `geo add ir` (any ISO code), built from RIR delegation data |
-| `smtp` module | off | blocks outbound TCP 25 (`SMTP_PORTS` to add 465/587) |
+| Country blocking | off | `geo add <cc>`, asks for confirmation, refuses countries that contain your gateway/DNS/SSH client (see below) |
+| `smtp` module | off | blocks outbound TCP 25 (`SMTP_PORTS` in the config file to add 465/587) |
 | `ports` module | off | blocks outbound TCP 23,135,139,445 and UDP 137,138 |
 | `scanguard` module | off | drops new connections when a port gets > 60 new destinations/min or a host > 30 new ports/min (80/443/53/853 exempt) |
 | `forward` module | off | also protect Docker containers, WireGuard/OpenVPN clients, NAT |
 | `logging` | on | rate-limited kernel log with the sending UID → `abuse-defender hits` |
 | `hosts` | on | sinkholes `appclick.co`, `pushnotificationws.com` (+ your own) in `/etc/hosts` |
-| Monitor mode | off | `mode monitor`: count and log (`AD-MON`) what would be dropped, drop nothing |
-| IP family | both | see the table below |
+| IPv6 | automatic | filtered when the host has working IPv6 and the backend supports it, skipped otherwise |
 | Auto updates | daily | systemd timer (or cron) with random delay, mirrors, checksums |
 | Doctor | - | read-only diagnosis: backend and kernel features, conflicts, gateway/DNS/mirrors, timers, stale lists |
 | Export / import | - | config, whitelist, custom blocks and extra domains in one archive |
 
 Settings live in `/etc/abuse-defender/abuse-defender.conf` (documented, every key
-validated, never executed). After editing it by hand run `abuse-defender apply`.
+validated, never executed). Advanced keys such as the download mirrors are only set
+there; after editing the file run `abuse-defender apply`.
 
-### Try before enforcing: monitor mode
+### Country blocking
 
-```bash
-abuse-defender mode monitor     # nothing is dropped; matches are counted and logged as AD-MON
-abuse-defender hits             # which destinations/ports/users would have been blocked
-abuse-defender mode enforce     # when you are happy
-```
+`abuse-defender geo add <cc>` (menu 12) blocks **all** outbound traffic to a country:
 
-Logging needs `LOG_BLOCKED=yes` (default) and kernel support; otherwise only the
-per-category counters in `status` are available.
+- **Data**: only `ir` (Iran) is pre-built in this repository (`lists/geo/`, rebuilt weekly
+  from the five RIR delegation files). Any other ISO code is fetched on demand: first
+  from this repository (if it is ever added there), then from
+  [ipverse/country-ip-blocks](https://github.com/ipverse/country-ip-blocks) (also built
+  from RIR delegation data), then from [ipdeny.com](https://www.ipdeny.com/). Every
+  download goes through the same validation as the other lists.
+- **Confirmation**: before anything changes it shows the number of IPv4/IPv6 prefixes
+  and that services hosted in that country become unreachable, and asks (menu) or
+  requires `--yes` (CLI).
+- **Self-protection**: it refuses a country whose prefixes contain your default
+  gateway, a DNS resolver or the IP of a connected SSH client, and says which one.
+  `--force` overrides this (not recommended; those addresses stay whitelisted anyway).
+- **Download failure**: if no valid list can be downloaded for the code, nothing is
+  enabled and the command fails with an error.
 
-### IP family modes
-
-| `IP_FAMILY` | What is filtered | Not supported / caveats |
-|---|---|---|
-| `both` (default) | IPv4, and IPv6 when the host has working IPv6 | On a host without IPv6 it silently runs as IPv4 only (shown in the status line). With nftables, IPv6 needs the `inet` table family; very old kernels fall back to IPv4 only. |
-| `4` | IPv4 only | IPv6 traffic is not filtered at all, including misrouted IPv6 to ULA/documentation space. |
-| `6` | IPv6 only | IPv4 traffic is not filtered at all. Refused on a host without working IPv6. The `feodo` category has no IPv6 data and the `abuse` list currently has no IPv6 entries, so only bogons, custom blocks, Spamhaus v6, country v6 and the port modules apply. |
-
-The scan guard works for IPv4 and IPv6 with nftables or ipset; with plain iptables it
-is skipped for both families.
+RIR data says where an address block is registered, not where it is used.
 
 ## How it keeps you safe (lock-out protection)
 
@@ -186,19 +194,26 @@ No. Gateways, resolvers from `/etc/resolv.conf`/systemd-resolved and known cloud
 endpoints are whitelisted automatically. For any other internal service run
 `abuse-defender whitelist <ip-or-cidr>`.
 
+**Can I see the rules before they are applied?** Yes: menu 6 or
+`abuse-defender --dry-run apply`. To run without protection for a while use
+`abuse-defender disable` (menu 4); `enable` brings everything back.
+
 **Docker / Kubernetes?** Containers talking to each other or to the host are not
 affected (not the uplink). Containers' internet traffic is *forwarded*, not output -
 enable `abuse-defender module forward on` to filter it too. The same applies to
 WireGuard/OpenVPN servers that NAT their clients.
 
 **Tailscale / ZeroTier / WireGuard (100.64.0.0/10, 10.x)?** Traffic inside the tunnel
-uses the tunnel interface and is not filtered. If you set `EGRESS_INTERFACES=all`, also
-whitelist the overlay subnet.
+uses the tunnel interface and is not filtered. If you set `EGRESS_INTERFACES=all` in the
+config file, also whitelist the overlay subnet.
+
+**My server has no IPv6.** Nothing to do: IPv6 rules are skipped automatically and the
+status line shows `IPv4 only (no IPv6 on this host)`.
 
 **Which backend is used?** nftables when available (Debian 10+, Ubuntu 20.04+, RHEL 8+,
 Fedora, Arch, Alpine), otherwise ipset + iptables, otherwise plain iptables (OpenVZ/LXC).
-Force one with `abuse-defender set BACKEND nft|ipset|iptables` or `--backend=`.
-`abuse-defender doctor` shows what works on your kernel.
+`abuse-defender doctor` shows what works on your kernel; `BACKEND=` in the config file
+forces one.
 
 **Xray/V2Ray?** Abuse Defender works in the kernel for every process. Add Xray routing
 rules as a second layer: [docs/xray-routing.md](docs/xray-routing.md).
@@ -215,7 +230,7 @@ and `/etc/local.d` (run `rc-update add local default`).
 ## Uninstall
 
 ```bash
-abuse-defender uninstall          # asks for confirmation
+abuse-defender uninstall          # asks for confirmation (menu 17)
 abuse-defender uninstall --yes    # non-interactive; --keep-config keeps /etc/abuse-defender
 ```
 

@@ -11,17 +11,21 @@ still opens the menu.
 
 ### Added
 - New interactive menu (main interface): header box, one-line status (protected,
-  backend, IPv4/IPv6, mode, last update, timer), grouped sections, validated input with
-  re-prompt, loop based, Ctrl+C safe. Every feature is reachable from it.
+  backend, IPv4/IPv6, last update, timer), grouped sections with contiguous numbering,
+  a prominent enable/disable item, validated input with re-prompt, loop based, Ctrl+C
+  safe. Every everyday feature is reachable from it.
 - Non-interactive CLI for scripts: `install update apply status doctor list block
-  unblock whitelist unwhitelist category geo module family mode set config hits enable
-  disable export import selftest self-update validate uninstall menu`, with `--yes
-  --dry-run --quiet --force --family --backend --confirm-timeout --no-confirm`.
+  unblock whitelist unwhitelist category geo module set config hits enable disable
+  export import selftest self-update validate uninstall menu`, with `--yes --dry-run
+  --quiet --force --backend --confirm-timeout --no-confirm`.
 - nftables backend (own table `inet abuse_defender`), ipset backend and plain iptables
   fallback, chosen automatically after probing the running kernel.
 - IPv6 protection (IANA IPv6 special-purpose bogons) that never touches link-local,
-  multicast or neighbour discovery; `IP_FAMILY=both|4|6` (both / IPv4 only / IPv6 only).
-- Monitor mode (`mode monitor`): count and log what would be blocked, drop nothing.
+  multicast or neighbour discovery; enabled automatically only when the host has
+  working IPv6.
+- Country blocking guard: `geo add` shows the number of prefixes and asks for
+  confirmation (`--yes` on the CLI), and refuses a country that contains the server's
+  gateway, DNS resolver or current SSH client (`--force` overrides).
 - `doctor`: read-only diagnosis of backend and kernel features, iptables-legacy/nft
   mix, ufw/firewalld/Docker, gateway/DNS/mirror reachability, timers, stale lists.
 - `export` / `import` of settings (config, whitelist, custom blocks, extra domains).
