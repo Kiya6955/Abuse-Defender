@@ -176,15 +176,9 @@ test_cli_basics() {
     run_ad; assert_rc $? 2 "no command without a terminal prints usage"
     printf '1.2.3.0/24\n2001:db8::/32\n' >"$T/l.txt"; run_ad validate "$T/l.txt"; assert_rc $? 0 "validate ok"
     printf '1.2.3.0/24\n999.1.1.1\n' >"$T/l.txt"; run_ad validate "$T/l.txt"; assert_rc $? 3 "validate bad"
-    run_ad status; assert_rc $? 0 "status when not installed"; assert_grep "$T/out" 'Protected: NO \(not installed\)'
+    run_ad status; assert_rc $? 0 "status when not installed"; assert_grep "$T/out" '^Protected: NO \(not installed\) \| backend: - \| IPv6: - \| updated: never \| timer: none$'
     run_ad update; assert_rc $? 1 "update refuses when not installed"; assert_grep "$T/out" 'not installed'
     run_ad config; assert_rc $? 0 "config"; assert_grep "$T/out" '^ENABLED="yes"$'
-    assert_nogrep "$T/out" '^(IP_FAMILY|MODE|LANGUAGE)=' "removed settings are gone"
-    run_ad --family=4 status; assert_rc $? 1 "--family was removed"
-    run_ad --no-ipv6 status; assert_rc $? 1 "--no-ipv6 was removed"
-    run_ad mode monitor; assert_rc $? 1 "mode command was removed"
-    run_ad family 4; assert_rc $? 1 "family command was removed"
-    run_ad --help; assert_nogrep "$T/out" 'monitor|family|--family' "help mentions no removed feature"
 }
 
 test_install_nft() {
@@ -219,14 +213,14 @@ test_install_nft() {
     assert_grep "$R/etc/hosts" '^::1 pushnotificationws\.com$'
     assert_grep "$R/etc/hosts" '^203\.0\.113\.5 vps1$' "foreign hosts lines kept"
     run_ad status; assert_rc $? 0 "status"
-    assert_grep "$T/out" '^Protected: YES \| backend: nft/inet \| IPv4\+IPv6 \| updated: .* \| timer: systemd' "one-line status"
+    assert_grep "$T/out" '^Protected: YES \| backend: nft/inet \| IPv6: yes \| updated: .* \| timer: systemd' "one-line status"
     assert_grep "$T/out" 'bogons +6 pkts' "counters shown (v4+v6)"
 }
 
 test_dry_run_output() {
     local s1 s2; s1="$(snapshot)"
     run_ad --dry-run --yes install; assert_rc $? 0 "dry-run install: $(tail -n 3 "$T/out")"
-    assert_grep "$T/out" '^----- dry-run: backend=nft/inet IPv4\+IPv6 egress=eth0 -----$' "dry-run header"
+    assert_grep "$T/out" '^----- dry-run: backend=nft/inet IPv6: yes egress=eth0 -----$' "dry-run header"
     assert_grep "$T/out" 'set bogons_v4 \(block\): 13 entries' "dry-run lists set sizes"
     assert_grep "$T/out" '^  chain egress \{' "dry-run shows the ruleset"
     assert_grep "$T/out" '172\.31\.1\.1/32 gateway' "dry-run shows the auto-whitelist"
@@ -237,7 +231,7 @@ test_dry_run_output() {
     run_ad --dry-run --yes block 203.0.113.0/24; assert_grep "$T/out" 'would add 203\.0\.113\.0/24'
     assert_nogrep "$R/etc/abuse-defender/custom-block.txt" '203\.0\.113' "dry-run block changed nothing"
     rm -f "$R/proc/net/if_inet6"
-    run_ad --dry-run --yes apply; assert_grep "$T/out" 'dry-run: backend=nft/inet IPv4 only \(no IPv6 on this host\)' "IPv6 is skipped automatically"
+    run_ad --dry-run --yes apply; assert_grep "$T/out" 'dry-run: backend=nft/inet IPv6: no \(not available\)' "IPv6 is skipped automatically"
 }
 
 test_idempotent_install() {
@@ -314,16 +308,12 @@ test_auto_replace_v1_leftovers() {
 test_upgrade_old_v2() {
     run_ad --yes install >/dev/null || { bad "install"; return; }
     sed 's/^AD_VERSION=.*/AD_VERSION="1.9.0"/' "$SCRIPT" >"$R/usr/local/sbin/abuse-defender"
-    printf 'IPV6="no"\nLANGUAGE="fa"\nIP_FAMILY="4"\nMODE="monitor"\n' >>"$R/etc/abuse-defender/abuse-defender.conf"
     run_ad --yes whitelist 10.20.0.0/16; assert_rc $? 0 "command on an older install: $(tail -n 3 "$T/out")"
     assert_grep "$T/out" 'found Abuse Defender v1\.9\.0 - upgrading to v2\.'
-    assert_eq "$(count "$T/out" 'monitor mode no longer exists')" 1 "one notice about the removed monitor mode"
     assert_grep "$R/usr/local/sbin/abuse-defender" '^AD_VERSION="2\.' "program upgraded"
-    assert_nogrep "$R/etc/abuse-defender/abuse-defender.conf" '^(LANGUAGE|IPV6|IP_FAMILY|MODE)=' "obsolete keys dropped"
     assert_grep "$R/etc/abuse-defender/abuse-defender.conf" '^ENABLED="yes"$' "still enabled"
     assert_grep "$R/etc/abuse-defender/whitelist.txt" '^10\.20\.0\.0/16$'
-    assert_grep "$(RS)" 'ip6 daddr @bogons_v6' "IPv6 automatic again (old IP_FAMILY=4 ignored)"
-    assert_grep "$(RS)" 'bogons_v4 counter drop' "enforced (old MODE=monitor ignored)"
+    assert_grep "$(RS)" 'bogons_v4 counter drop' "rules re-applied by the upgrade"
 }
 
 test_newer_installed_wins() {
@@ -333,17 +323,6 @@ test_newer_installed_wins() {
     run_ad status; assert_grep "$T/out" 'newer program ran: status' "an older copy hands over to the newer installed program"
 }
 
-test_obsolete_config_keys() {
-    run_ad --yes install >/dev/null || { bad "install"; return; }
-    printf 'IP_FAMILY="6"\nMODE="monitor"\nLANGUAGE="fa"\nIPV6="no"\n' >>"$R/etc/abuse-defender/abuse-defender.conf"
-    run_ad status; assert_rc $? 0 "status with obsolete keys"
-    assert_eq "$(count "$T/out" 'monitor mode no longer exists - protection is enforced')" 1 "monitor notice printed once"
-    assert_nogrep "$T/out" 'unknown key' "obsolete keys are dropped silently"
-    run_ad ensure; assert_rc $? 0 "ensure rewrites the config"
-    assert_nogrep "$R/etc/abuse-defender/abuse-defender.conf" '^(LANGUAGE|IPV6|IP_FAMILY|MODE)=' "obsolete keys removed from the file"
-    run_ad status; assert_nogrep "$T/out" 'monitor mode' "notice is shown only until the config is rewritten"
-    assert_grep "$T/out" 'Protected: YES'
-}
 
 geo_country() {   # geo_country CC "v4 prefixes" "v6 prefixes": publish a fake country list on both mirrors
     local cc=$1 v4=$2 v6=$3 mm
@@ -434,8 +413,8 @@ test_doctor() {
     run_ad doctor; assert_rc $? 0 "doctor on a healthy install: $(grep -E 'FAIL' "$T/out" | head -n 3)"
     assert_grep "$T/out" '\[ OK \] rules are loaded in the kernel'
     assert_grep "$T/out" '\[ OK \] the kernel accepts the full ruleset'
-    assert_grep "$T/out" '\[ OK \] mirror reachable: https://raw\.githubusercontent\.com'
-    assert_grep "$T/out" '\[WARN\] mirror unreachable: https://fastly'
+    assert_grep "$T/out" '\[ OK \] download location reachable: https://raw\.githubusercontent\.com'
+    assert_grep "$T/out" '\[WARN\] download location unreachable: https://fastly'
     assert_grep "$T/out" 'Summary: 0 failure'
     ad_env nft delete table inet abuse_defender
     run_ad doctor; assert_rc $? 1 "doctor detects missing rules"; assert_grep "$T/out" 'rules are NOT loaded'
@@ -454,8 +433,8 @@ test_input_validation() {
     run_ad unblock 203.0.113.0/24; assert_nogrep "$R/etc/abuse-defender/custom-block.txt" '^203\.0\.113' "unblock"
     run_ad --yes whitelist 2001:db8:abcd::/48; assert_grep "$R/var/lib/abuse-defender/applied/sets/allow_v6" '^2001:db8:abcd::/48$'
     printf 'ENABLED=yes\nCATEGORIES="bogons $(touch %s/pwned)"\nFOO=bar\n' "$T" >"$R/etc/abuse-defender/abuse-defender.conf"
-    run_ad status; assert_no_file "$T/pwned"; assert_grep "$T/out" 'invalid value for CATEGORIES'
-    run_ad --yes set MIRRORS 'https://example.com/*'; assert_rc $? 1 "glob characters refused in MIRRORS"
+    run_ad status; assert_no_file "$T/pwned"; assert_grep "$T/out" 'invalid value for CATEGORIES'; assert_grep "$T/out" 'unknown key FOO \(ignored\)' "unknown keys are warned about and ignored"
+    run_ad --yes set SMTP_PORTS '25;reboot'; assert_rc $? 1 "shell metacharacters refused in settings"
 }
 
 test_rollback_on_selftest_failure() {
@@ -660,12 +639,11 @@ test_menu_flow() {
     cp "$T/out" "$T/menu.out"
     local m="$T/menu.out" c="$R/etc/abuse-defender/abuse-defender.conf"
     assert_grep "$m" '^\+-+\+$' "header box"
-    assert_grep "$m" '^Protected: YES \| backend: nft/inet \| IPv4\+IPv6 \| updated: ' "status line after install"
+    assert_grep "$m" '^Protected: YES \| backend: nft/inet \| IPv6: yes \| updated: ' "status line after install"
     assert_grep "$m" '^   4\) Disable protection \(keeps settings\)$' "enable/disable is item 4"
     assert_grep "$m" '^   4\) Enable protection$' "item 4 turns into Enable when disabled"
     assert_grep "$m" '^  16\) Export / import settings       17\) Uninstall completely$' "contiguous numbering up to 17"
     assert_grep "$m" 'Choose \[0-17\]: ' "prompt range"
-    assert_nogrep "$m" 'Mode \(|IP family|Mirrors and other settings|monitor' "removed menu items are gone"
     assert_grep "$m" 'please enter a number between 0 and 17' "invalid menu choice re-prompts"
     assert_grep "$m" "'999\.1\.1\.1' is not accepted" "invalid IP re-prompts"
     assert_grep "$R/etc/abuse-defender/whitelist.txt" '^10\.9\.0\.0/16$' "whitelist via menu"
@@ -673,9 +651,9 @@ test_menu_flow() {
     assert_grep "$c" '^CATEGORIES="bogons abuse spamhaus"$' "category via menu"
     assert_grep "$m" 'This blocks ALL outbound traffic to IR' "country confirmation shown"
     assert_grep "$c" '^GEO_COUNTRIES="ir"$' "country via menu"
-    assert_grep "$m" 'dry-run: backend=nft/inet IPv4\+IPv6 egress=eth0' "preview via menu"
+    assert_grep "$m" 'dry-run: backend=nft/inet IPv6: yes egress=eth0' "preview via menu"
     assert_grep "$m" 'Summary: [0-9]+ failure' "doctor via menu"
-    assert_grep "$m" '^MIRRORS="https://' "show settings via menu (read-only)"
+    assert_grep "$m" '^HOSTS_BLOCK="yes"$' "show settings via menu (read-only)"
     assert_grep "$m" 'protection disabled' "disable via menu"
     assert_grep "$c" '^ENABLED="yes"$' "enabled again via menu"
     assert_file "$(RS)"
@@ -701,7 +679,7 @@ test_menu_uninstall() {
 # ---------------------------------------------------------------- runner
 ALL=(list_parsing build_lists_check cli_basics install_nft dry_run_output idempotent_install migration_to_nft
      auto_replace_v1_menu auto_replace_v1_failure_keeps_old auto_replace_v1_leftovers upgrade_old_v2 newer_installed_wins
-     obsolete_config_keys geo_guard migration_to_ipset plain_iptables_backend doctor input_validation
+     geo_guard migration_to_ipset plain_iptables_backend doctor input_validation
      rollback_on_selftest_failure render_fallback_levels modules update_logic fresh_offline_install
      legacy_list_fallback no_ipv6_host no_default_route alpine_and_none uninstall_clean v1_only_uninstall
      export_import hits disable_enable geo menu_flow menu_uninstall)

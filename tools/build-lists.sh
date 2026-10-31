@@ -19,11 +19,11 @@ source ./abuse-defender.sh
 trap - ERR
 set +E
 
-MODE=build
+ACTION=build
 GEO=0
 for a in "$@"; do
     case $a in
-    --check) MODE=check ;;
+    --check) ACTION=check ;;
     --geo) GEO=1 ;;
     -h|--help) sed -n '2,12p' "$0"; exit 0 ;;
     *) echo "unknown argument: $a" >&2; exit 2 ;;
@@ -185,7 +185,7 @@ gen_sums() {
 gen_legacy >"$WORK/abuse-ips.ipv4"
 if grep -Eqv '^([0-9]{1,3}\.){3}[0-9]{1,3}/[0-9]{1,2}$' "$WORK/abuse-ips.ipv4"; then problem "derived abuse-ips.ipv4 has a non-CIDR line"; fi
 
-if [[ $MODE == check ]]; then
+if [[ $ACTION == check ]]; then
     cmp -s "$WORK/abuse-ips.ipv4" abuse-ips.ipv4 || problem "abuse-ips.ipv4 is out of date - run tools/build-lists.sh"
     gen_sums >"$WORK/SHA256SUMS"
     cmp -s "$WORK/SHA256SUMS" lists/SHA256SUMS || problem "lists/SHA256SUMS is out of date - run tools/build-lists.sh"
