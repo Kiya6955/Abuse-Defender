@@ -32,7 +32,7 @@ AD_URL="https://github.com/${AD_REPO}"
 R="${AD_ROOT:-}"
 PROC_DIR="${AD_PROC:-/proc}"
 CONF_DIR="$R/etc/abuse-defender"
-CONF_FILE="${AD_CONFIG:-$CONF_DIR/abuse-defender.conf}"
+CONF_FILE="$CONF_DIR/abuse-defender.conf"
 WHITELIST_FILE="$CONF_DIR/whitelist.txt"
 CUSTOM_FILE="$CONF_DIR/custom-block.txt"
 USER_DOMAINS_FILE="$CONF_DIR/domains.txt"
@@ -63,7 +63,8 @@ IPSET_PREFIX6="ad6-"
 HOSTS_BEGIN="# >>> abuse-defender managed block (do not edit) >>>"
 HOSTS_END="# <<< abuse-defender managed block <<<"
 
-DEFAULT_MIRRORS="https://raw.githubusercontent.com/${AD_REPO}/main https://cdn.jsdelivr.net/gh/${AD_REPO}@main https://fastly.jsdelivr.net/gh/${AD_REPO}@main https://gcore.jsdelivr.net/gh/${AD_REPO}@main"
+# download locations, tried in order (some networks block raw.githubusercontent.com)
+DOWNLOAD_BASES="https://raw.githubusercontent.com/${AD_REPO}/main https://cdn.jsdelivr.net/gh/${AD_REPO}@main https://fastly.jsdelivr.net/gh/${AD_REPO}@main https://gcore.jsdelivr.net/gh/${AD_REPO}@main"
 
 # ---------------------------------------------------------------------------
 # Global runtime state
@@ -75,9 +76,7 @@ FORCE=0
 OPT_BACKEND=""
 OPT_JITTER=0
 OPT_KEEP_CONFIG=0
-OPT_CONFIRM_TIMEOUT=""
-OPT_NO_CONFIRM=0
-OPT_SETS_ONLY=0
+OPT_CONFIRM_TIMEOUT=60
 TMP_ROOT=""
 LOCK_HELD=0
 LOCK_DIR_FALLBACK=""
@@ -93,7 +92,6 @@ IS_ROOT=0
 # Resolved at runtime
 BACKEND=""          # nft | ipset | iptables
 NFT_FAMILY=""       # inet | ip
-IPV4_ON=1
 IPV6_ON=0
 IPT_W=()
 IPT_HAS_CONNTRACK=1
@@ -290,11 +288,6 @@ CONFIG_SCHEMA=(
 "HOSTS_BLOCK|yes|^(yes|no)$|Sinkhole the domains from lists/domains.txt + domains.txt in a managed /etc/hosts block."
 "UPDATE_ENABLED|yes|^(yes|no)$|Automatic list updates (systemd timer or cron)."
 "UPDATE_INTERVAL|daily|^(6h|12h|daily|weekly)$|How often to update lists: 6h, 12h, daily, weekly."
-"MIRRORS|$DEFAULT_MIRRORS|^https://[^] \"'\`\$;|&<>*?[{}]+( https://[^] \"'\`\$;|&<>*?[{}]+)*$|Base URLs tried in order to download lists (HTTPS only)."
-"VERIFY_CHECKSUMS|yes|^(yes|strict|no)$|Verify downloads against SHA256SUMS: yes (when published), strict (required), no."
-"MAX_SHRINK_PERCENT|50|^[0-9]{1,3}$|Reject a downloaded list that is this many percent smaller than the last good one."
-"LOG_FILE|$DEFAULT_LOG_FILE|^(/[A-Za-z0-9_./-]+)?$|Log file (empty = no file logging; journald still captures timer output)."
-"CONFIRM_TIMEOUT|60|^[0-9]{1,4}$|Seconds to confirm risky changes interactively before automatic rollback (0 = no prompt)."
 )
 
 declare -A CFG=()
@@ -325,8 +318,6 @@ config_regex() {
 }
 
 # Parse KEY=VALUE lines without ever executing the file.
-CONFIG_OBSOLETE=0
-MONITOR_NOTICE=0
 config_load() {
     config_defaults
     [[ -f "$CONF_FILE" ]] || return 0
@@ -341,17 +332,6 @@ config_load() {
         key="${BASH_REMATCH[1]}"; val="${BASH_REMATCH[2]}"
         val="${val%%+([[:space:]])}"
         if [[ "$val" =~ ^\"(.*)\"$ || "$val" =~ ^\'(.*)\'$ ]]; then val="${BASH_REMATCH[1]}"; fi
-        case $key in
-        IPV6|IP_FAMILY|LANGUAGE)   # removed settings: IPv6 is always automatic, UI is English
-            CONFIG_OBSOLETE=1; continue ;;
-        MODE)
-            CONFIG_OBSOLETE=1
-            if [[ $val == monitor && $MONITOR_NOTICE -eq 0 ]]; then
-                MONITOR_NOTICE=1
-                warn "monitor mode no longer exists - protection is enforced (use 'disable' to turn it off)"
-            fi
-            continue ;;
-        esac
         if ! re="$(config_regex "$key")"; then
             warn "config line $n: unknown key $key (ignored)"; continue
         fi
@@ -401,8 +381,7 @@ config_list_del() {
 }
 
 apply_runtime_config() {
-    LOG_FILE="${CFG[LOG_FILE]}"
-    if [[ -n "$LOG_FILE" && $IS_ROOT -eq 1 ]]; then LOG_TO_FILE=1; else LOG_TO_FILE=0; fi
+    if [[ $IS_ROOT -eq 1 ]]; then LOG_TO_FILE=1; else LOG_TO_FILE=0; fi
 }
 
 # ---------------------------------------------------------------------------
@@ -558,7 +537,6 @@ normalize_one() {
     printf '%s\n' "$out"
 }
 
-family_of() { if [[ $1 == *:* ]]; then echo 6; else echo 4; fi; }
 
 # ---------------------------------------------------------------------------
 # Built-in fallback lists (used only when nothing could ever be downloaded).
@@ -736,20 +714,13 @@ mirror_sums() {
     printf '%s' "${SUMS_CACHE[$base]}"
 }
 
-# verify_sum BASE RELPATH FILE -> 0 ok/unknown-allowed, 1 mismatch/required-missing
+# verify_sum BASE RELPATH FILE -> 1 only when SHA256SUMS lists the file with another hash
 verify_sum() {
     local base=$1 rel=$2 file=$3 sums expected actual
-    [[ ${CFG[VERIFY_CHECKSUMS]} == no ]] && return 0
     sums="$(mirror_sums "$base")"
-    if [[ -z "$sums" ]]; then
-        [[ ${CFG[VERIFY_CHECKSUMS]} == strict ]] && { warn "no SHA256SUMS at $base (strict mode)"; return 1; }
-        return 0
-    fi
+    [[ -n "$sums" ]] || return 0
     expected="$(awk -v f="$rel" '$2==f || $2=="*" f {print $1; exit}' "$sums")"
-    if [[ -z "$expected" ]]; then
-        [[ ${CFG[VERIFY_CHECKSUMS]} == strict ]] && { warn "$rel not listed in SHA256SUMS"; return 1; }
-        return 0
-    fi
+    [[ -n "$expected" ]] || return 0
     actual="$(sha256_of "$file")"
     if [[ "$actual" != "$expected" ]]; then
         warn "checksum mismatch for $rel from $base (stale CDN cache or tampering) - trying next mirror"
@@ -763,7 +734,7 @@ fetch_source() {
     FETCHED_FROM=""
     source_info "$name" || return 1
     for rel in $SRC_REPO; do
-        for base in ${CFG[MIRRORS]}; do
+        for base in $DOWNLOAD_BASES; do
             if http_get_tracked "$base/$rel" "$out" && [[ -s "$out" ]]; then
                 if verify_sum "$base" "$rel" "$out"; then FETCHED_FROM="$base/$rel"; return 0; fi
             fi
@@ -811,7 +782,7 @@ sanity_check() {
     fi
     if [[ -f "$CACHE_DIR/$name.txt" && $FORCE -eq 0 ]]; then
         oldc="$(count_lines "$CACHE_DIR/$name.txt")"
-        pct="${CFG[MAX_SHRINK_PERCENT]}"
+        pct=50   # a list that loses more than half of its entries is suspicious
         if (( oldc >= 20 && newc * 100 < oldc * (100 - pct) )); then
             warn "$name rejected: shrank from $oldc to $newc entries (> ${pct}%); use --force to accept"
             return 1
@@ -1008,7 +979,7 @@ ipt_probe() {   # probe iptables features for family $1, sets IPT_HAS_*
 # IPv4 is always protected; IPv6 only when the host has working IPv6 and the backend can filter it.
 select_backend() {
     local want="${OPT_BACKEND:-${CFG[BACKEND]}}"
-    BACKEND=""; NFT_FAMILY=""; IPV4_ON=1; IPV6_ON=0
+    BACKEND=""; NFT_FAMILY=""; IPV6_ON=0
     local v6ok=0
     if ipv6_available; then v6ok=1; fi
 
@@ -1049,10 +1020,8 @@ select_backend() {
     return 0
 }
 
-active_fams() { [[ $IPV4_ON -eq 1 ]] && printf '4 '; [[ $IPV6_ON -eq 1 ]] && printf '6'; printf '\n'; }
-family_label() {   # family_label V4 V6
-    if [[ $2 == 1 ]]; then echo "IPv4+IPv6"; else echo "IPv4 only (no IPv6 on this host)"; fi
-}
+active_fams() { if [[ $IPV6_ON -eq 1 ]]; then echo "4 6"; else echo 4; fi; }
+ipv6_label() { if [[ ${1:-0} == 1 ]]; then echo "IPv6: yes"; else echo "IPv6: no (not available)"; fi; }
 
 iptables_variant() {
     have iptables || { echo none; return 0; }
@@ -1134,7 +1103,6 @@ plan_build() {
 
 ports_csv() { local IFS=,; printf '%s' "$*"; }
 ports_nft() { local out="" p; for p in "$@"; do out="${out:+$out, }$p"; done; printf '%s' "$out"; }
-valid_ports() { local p; for p in "$@"; do [[ "$p" =~ ^[0-9]+$ ]] && (( p >= 1 && p <= 65535 )) || return 1; done; }
 
 # ---------------------------------------------------------------------------
 # Rendering: nftables
@@ -1167,11 +1135,9 @@ render_nft() {
             printf '  set %s { type %s; flags interval; }\n' "$name" "$type"
         done <"$dir/sets.txt"
         if [[ $mods -eq 1 && ${CFG[SCAN_GUARD]} == yes ]]; then
-            if [[ $IPV4_ON -eq 1 ]]; then
-                printf '  set sg_seen_v4 { type ipv4_addr . inet_service; flags dynamic,timeout; timeout 10m; size 262144; }\n'
-                printf '  set sg_port_v4 { type inet_service; flags dynamic,timeout; timeout 5m; size 65536; }\n'
-                printf '  set sg_host_v4 { type ipv4_addr; flags dynamic,timeout; timeout 5m; size 262144; }\n'
-            fi
+            printf '  set sg_seen_v4 { type ipv4_addr . inet_service; flags dynamic,timeout; timeout 10m; size 262144; }\n'
+            printf '  set sg_port_v4 { type inet_service; flags dynamic,timeout; timeout 5m; size 65536; }\n'
+            printf '  set sg_host_v4 { type ipv4_addr; flags dynamic,timeout; timeout 5m; size 262144; }\n'
             if [[ $IPV6_ON -eq 1 ]]; then
                 printf '  set sg_seen_v6 { type ipv6_addr . inet_service; flags dynamic,timeout; timeout 10m; size 262144; }\n'
                 printf '  set sg_port_v6 { type inet_service; flags dynamic,timeout; timeout 5m; size 65536; }\n'
@@ -1181,7 +1147,7 @@ render_nft() {
 
         printf '  chain egress {\n'
         [[ ${CFG[STATEFUL]} == yes ]] && printf '    ct state established,related return\n'
-        [[ $IPV4_ON -eq 1 ]] && printf '    meta nfproto ipv4 udp sport 68 udp dport 67 return\n'
+        printf '    meta nfproto ipv4 udp sport 68 udp dport 67 return\n'
         if [[ $IPV6_ON -eq 1 ]]; then
             printf '    icmpv6 type { nd-router-solicit, nd-neighbor-solicit, nd-neighbor-advert, mld-listener-report, mld2-listener-report } return\n'
             printf '    udp sport 546 udp dport 547 return\n'
@@ -1225,7 +1191,6 @@ render_nft() {
             [[ -n "$ex" ]] && printf '    tcp dport { %s } return\n' "$(ports_nft $ex)"
             for v in 4 6; do
                 [[ $v == 6 && $IPV6_ON -ne 1 ]] && continue
-                [[ $v == 4 && $IPV4_ON -ne 1 ]] && continue
                 printf '    %s daddr . tcp dport @sg_seen_v%s return\n' "$(addrf $v)" "$v"
                 local nfp=ipv4; [[ $v == 6 ]] && nfp=ipv6
                 [[ $log -eq 1 ]] && printf '    meta nfproto %s update @sg_port_v%s { tcp dport limit rate over %s/minute burst %s packets } limit rate %s/minute burst 5 packets log prefix "%s scanguard: " level info\n' "$nfp" "$v" "$d" "$((d * 2))" "$rate" "$pfx"
@@ -1279,7 +1244,6 @@ render_ipt() {
     : >"$dir/jumps.txt"; : >"$dir/chains.txt"; : >"$dir/ipsets.txt"
     for fam in 4 6; do
         [[ $fam == 6 && $IPV6_ON -ne 1 ]] && continue
-        [[ $fam == 4 && $IPV4_ON -ne 1 ]] && continue
         local out="$dir/rules$fam.ipt" M="$IPT_MAIN" name f kind tag chain
         local -a chains=("$M") body=()
         lg() {  # lg MATCH TAG  -> log+drop lines into body
@@ -1429,8 +1393,8 @@ bundle_build() {
         level=$((level + 1))
     done
     {
-        printf 'version=%s\nbackend=%s\nnft_family=%s\nipv4=%s\nipv6=%s\nlevel=%s\ncreated=%s\n' \
-            "$AD_VERSION" "$BACKEND" "$NFT_FAMILY" "$IPV4_ON" "$IPV6_ON" "$level" "$(now_epoch)"
+        printf 'version=%s\nbackend=%s\nnft_family=%s\nipv6=%s\nlevel=%s\ncreated=%s\n' \
+            "$AD_VERSION" "$BACKEND" "$NFT_FAMILY" "$IPV6_ON" "$level" "$(now_epoch)"
     } >"$dir/meta"
     printf '%s\n' ${RENDER_NOTES[@]+"${RENDER_NOTES[@]}"} | sort -u | grep . >"$dir/notes.txt" || true
     bundle_hash "$dir" >"$dir/hash"
@@ -1906,7 +1870,7 @@ legacy_cleanup() {   # remove v1 artefacts that are no longer needed (rules hand
 # ---------------------------------------------------------------------------
 selftest() {   # prints "name ok|fail" lines
     local gw first_mirror host
-    first_mirror="$(awk '{print $1}' <<<"${CFG[MIRRORS]}")"
+    first_mirror="${DOWNLOAD_BASES%% *}"
     host="${first_mirror#https://}"; host="${host%%/*}"
     if have curl; then
         if curl -fsS -o /dev/null --max-time 10 -I "https://$host/" 2>/dev/null; then echo "https-$host ok"; else echo "https-$host fail"; fi
@@ -1979,7 +1943,7 @@ apply_pipeline() {
     bundle_build "$new" || return 1
     if [[ -s "$new/notes.txt" ]]; then while read -r l; do warn "$l"; done <"$new/notes.txt"; fi
     if [[ $DRY_RUN -eq 1 ]]; then
-        say "----- dry-run: backend=$BACKEND$([[ $BACKEND == nft ]] && echo "/$NFT_FAMILY") $(family_label "$IPV4_ON" "$IPV6_ON") egress=$( [[ -s $new/egress.txt ]] && paste -sd' ' "$new/egress.txt" || echo all) -----"
+        say "----- dry-run: backend=$BACKEND$([[ $BACKEND == nft ]] && echo "/$NFT_FAMILY") $(ipv6_label "$IPV6_ON") egress=$( [[ -s $new/egress.txt ]] && paste -sd' ' "$new/egress.txt" || echo all) -----"
         say "auto-whitelist:"; sed 's/^/  /' "$new/auto-allow.txt"
         while read -r name fam kind tag; do say "  set $name ($kind): $(count_lines "$new/sets/$name") entries"; done <"$new/sets.txt"
         if [[ -f "$new/ruleset.nft" ]]; then grep -v '^add element' "$new/ruleset.nft"; say "(+ $(grep -c '^add element' "$new/ruleset.nft" || true) element chunks)"; fi
@@ -2013,8 +1977,8 @@ apply_pipeline() {
         return 1
     fi
 
-    local timeout="${OPT_CONFIRM_TIMEOUT:-${CFG[CONFIRM_TIMEOUT]}}"
-    if [[ $want_confirm == yes && $INTERACTIVE -eq 1 && $ASSUME_YES -eq 0 && $OPT_NO_CONFIRM -eq 0 && $timeout -gt 0 ]]; then
+    local timeout="$OPT_CONFIRM_TIMEOUT"
+    if [[ $want_confirm == yes && $INTERACTIVE -eq 1 && $ASSUME_YES -eq 0 && $timeout -gt 0 ]]; then
         local token ans
         token="$$-$(now_epoch)-$RANDOM"
         PENDING_CONFIRM=1
@@ -2034,7 +1998,7 @@ apply_pipeline() {
             return 1
         fi
     fi
-    ok "rules applied: backend=$BACKEND$([[ $BACKEND == nft ]] && echo "($NFT_FAMILY)") $(family_label "$IPV4_ON" "$IPV6_ON") egress=$( [[ -s $APPLIED_DIR/egress.txt ]] && paste -sd' ' "$APPLIED_DIR/egress.txt" || echo all)"
+    ok "rules applied: backend=$BACKEND$([[ $BACKEND == nft ]] && echo "($NFT_FAMILY)") $(ipv6_label "$IPV6_ON") egress=$( [[ -s $APPLIED_DIR/egress.txt ]] && paste -sd' ' "$APPLIED_DIR/egress.txt" || echo all)"
     return 0
 }
 
@@ -2074,7 +2038,7 @@ self_source_file() {   # prints a path to a copy of this script suitable for ins
     # running from a pipe (bash <(curl ...)): fetch a fresh copy
     tmp_init
     local base out="$TMP_ROOT/abuse-defender.sh"
-    for base in ${CFG[MIRRORS]}; do
+    for base in $DOWNLOAD_BASES; do
         if http_get_tracked "$base/abuse-defender.sh" "$out" && bash -n "$out" 2>/dev/null && grep -q '^AD_VERSION=' "$out" &&
             verify_sum "$base" "abuse-defender.sh" "$out"; then
             printf '%s' "$out"; return 0
@@ -2166,7 +2130,7 @@ do_install() {
     config_write
     install_binary
     select_backend
-    info "backend: $BACKEND$([[ $BACKEND == nft ]] && echo " ($NFT_FAMILY)")$([[ $BACKEND != nft ]] && echo " (iptables $(iptables_variant))"), $(family_label "$IPV4_ON" "$IPV6_ON")"
+    info "backend: $BACKEND$([[ $BACKEND == nft ]] && echo " ($NFT_FAMILY)")$([[ $BACKEND != nft ]] && echo " (iptables $(iptables_variant))"), $(ipv6_label "$IPV6_ON")"
     local c; while read -r c; do [[ -n "$c" ]] && warn "$c"; done < <(detect_conflicts)
     update_sources || true
     if ! apply_pipeline "$confirm"; then
@@ -2209,7 +2173,6 @@ auto_replace_old() {
         iv="$(installed_version)"
         if [[ -z "$iv" ]] || version_gt "$AD_VERSION" "$iv"; then upgrade=1; fi
     fi
-    [[ -f "$CONF_FILE" && $CONFIG_OBSOLETE -eq 1 ]] && upgrade=1
     [[ $v1 -eq 1 || $upgrade -eq 1 ]] || return 0
     lock_acquire
     if [[ $v1 -eq 1 ]]; then
@@ -2309,8 +2272,6 @@ cmd_ensure() {
     [[ -f "$CONF_FILE" ]] || return 0
     lock_acquire 300
     legacy_detect && [[ -f "$INSTALL_BIN" ]] && legacy_cleanup
-    # drop settings that no longer exist (IP_FAMILY, MODE, ...) so the notice is shown once
-    [[ $CONFIG_OBSOLETE -eq 1 ]] && config_write
     if [[ ${CFG[ENABLED]} != yes ]]; then
         if [[ -n "$(nft_tables_ours 2>/dev/null)" ]] || { have iptables && [[ -n "$(ipt_our_chains 4)" ]]; }; then
             teardown_rules; rm -rf -- "$APPLIED_DIR"; hosts_apply no
@@ -2343,10 +2304,6 @@ cmd_boot() {
     local b; b="$(meta_get "$APPLIED_DIR" backend)"
     if [[ $b != nft ]]; then
         if have iptables && iptables -w -L -n >/dev/null 2>&1; then IPT_W=(-w); fi
-    fi
-    if [[ $OPT_SETS_ONLY -eq 1 ]]; then
-        [[ $b == ipset ]] && ipset_apply "$APPLIED_DIR"
-        return 0
     fi
     bundle_apply "$APPLIED_DIR" || { err "boot restore failed"; return 1; }
     hosts_apply "${CFG[HOSTS_BLOCK]}"
@@ -2540,7 +2497,7 @@ cmd_set() {   # set KEY VALUE (generic, for automation)
     config_set "$key" "$*"
     config_write
     case $key in
-    UPDATE_INTERVAL|UPDATE_ENABLED|LOG_FILE) [[ -f "$INSTALL_BIN" ]] && persist_install; ok "$key=\"$*\"" ;;
+    UPDATE_INTERVAL|UPDATE_ENABLED) [[ -f "$INSTALL_BIN" ]] && persist_install; ok "$key=\"$*\"" ;;
     *) ok "$key=\"$*\" (run 'abuse-defender apply' to activate)" ;;
     esac
 }
@@ -2597,7 +2554,7 @@ cmd_uninstall() {
     rm -rf -- "$STATE_DIR" "$RUN_DIR"
     [[ $OPT_KEEP_CONFIG -eq 1 ]] || rm -rf -- "$CONF_DIR"
     LOG_TO_FILE=0
-    [[ -n "$LOG_FILE" ]] && rm -f -- "$LOG_FILE" "$LOG_FILE".[0-9]* "$LOG_FILE".*.gz 2>/dev/null
+    rm -f -- "$LOG_FILE" "$LOG_FILE".[0-9]* "$LOG_FILE".*.gz 2>/dev/null || true
     ok "Abuse Defender removed.$([[ $OPT_KEEP_CONFIG -eq 1 ]] && echo " Settings kept in ${CONF_DIR#"$R"}.")"
 }
 
@@ -2653,7 +2610,7 @@ last_update_str() {
 }
 
 status_line() {   # one line: protected | backend | families | updated | timer
-    local prot="${C_RED}NO${C_OFF}" bk="-" famtxt="-"
+    local prot="${C_RED}NO${C_OFF}" bk="-" famtxt="IPv6: -"
     if [[ ! -f "$CONF_FILE" ]]; then prot="${C_RED}NO (not installed)${C_OFF}"
     elif [[ ${CFG[ENABLED]} != yes ]]; then prot="${C_YEL}NO (disabled)${C_OFF}"
     elif [[ $IS_ROOT -eq 1 && -f "$APPLIED_DIR/meta" ]] && rules_live 2>/dev/null; then
@@ -2662,7 +2619,7 @@ status_line() {   # one line: protected | backend | families | updated | timer
     if [[ -f "$APPLIED_DIR/meta" ]]; then
         bk="$(meta_get "$APPLIED_DIR" backend)"
         [[ $bk == nft ]] && bk="nft/$(meta_get "$APPLIED_DIR" nft_family)"
-        famtxt="$(family_label "$(meta_get "$APPLIED_DIR" ipv4)" "$(meta_get "$APPLIED_DIR" ipv6)")"
+        famtxt="$(ipv6_label "$(meta_get "$APPLIED_DIR" ipv6)")"
     fi
     printf 'Protected: %s | backend: %s | %s | updated: %s | timer: %s\n' \
         "$prot" "$bk" "$famtxt" "$(last_update_str)" "$(timer_state)"
@@ -2847,7 +2804,7 @@ cmd_doctor() {
 
     say ""; say "Firewall"
     if have nft; then
-        if nft_probe inet; then d_ok "nftables usable (inet family, IPv4+IPv6)"
+        if nft_probe inet; then d_ok "nftables usable (inet family: IPv4 and IPv6)"
         elif nft_probe ip; then d_warn "nftables usable for IPv4 only (no inet family)"
         else d_warn "nft installed but not usable (kernel modules/permissions?)"; fi
     else d_info "nft not installed"; fi
@@ -2860,7 +2817,7 @@ cmd_doctor() {
     fi
     if have ipset; then d_info "ipset installed"; fi
     local sel
-    if sel="$(select_backend 2>&1 >/dev/null && printf 'backend=%s%s, %s' "$BACKEND" "${NFT_FAMILY:+/$NFT_FAMILY}" "$(family_label "$IPV4_ON" "$IPV6_ON")")"; then
+    if sel="$(select_backend 2>&1 >/dev/null && printf 'backend=%s%s, %s' "$BACKEND" "${NFT_FAMILY:+/$NFT_FAMILY}" "$(ipv6_label "$IPV6_ON")")"; then
         d_ok "selected: $sel (BACKEND=${CFG[BACKEND]})"
         select_backend >/dev/null 2>&1
         tmp_init
@@ -2890,17 +2847,17 @@ cmd_doctor() {
     dns="$(detect_dns | grep -v '^127\.' | grep -v '^::1$' | sort -u | tr '\n' ' ' || true)"
     [[ -n "$dns" ]] && d_info "DNS resolvers: $dns(always allowed)"
     local first host
-    first="$(awk '{print $1}' <<<"${CFG[MIRRORS]}")"; host="$(host_of "$first")"
+    first="${DOWNLOAD_BASES%% *}"; host="$(host_of "$first")"
     if have getent && getent ahosts "$host" >/dev/null 2>&1; then d_ok "DNS resolution works ($host)"
     elif have getent; then d_fail "cannot resolve $host - DNS problem"; fi
     local base okm=0
     tmp_init
-    for base in ${CFG[MIRRORS]}; do
+    for base in $DOWNLOAD_BASES; do
         if http_get "$base/lists/SHA256SUMS" "$TMP_ROOT/doctor-sums" || http_get "$base/abuse-ips.ipv4" "$TMP_ROOT/doctor-sums"; then
-            d_ok "mirror reachable: $base"; okm=$((okm + 1))
-        else d_warn "mirror unreachable: $base"; fi
+            d_ok "download location reachable: $base"; okm=$((okm + 1))
+        else d_warn "download location unreachable: $base"; fi
     done
-    [[ $okm -gt 0 ]] || d_fail "no mirror reachable - updates fail (cached lists keep working); set MIRRORS"
+    [[ $okm -gt 0 ]] || d_fail "no download location reachable - updates fail (cached lists keep working)"
     if ipv6_available; then
         if have ip && ip -6 route show default 2>/dev/null | grep -q .; then d_ok "IPv6 available with a default route"
         else d_info "IPv6 enabled in the kernel but no IPv6 default route"; fi
@@ -2984,7 +2941,7 @@ cmd_self_update() {
     lock_acquire
     tmp_init
     local base out="$TMP_ROOT/new.sh" v
-    for base in ${CFG[MIRRORS]}; do
+    for base in $DOWNLOAD_BASES; do
         if http_get_tracked "$base/abuse-defender.sh" "$out" && bash -n "$out" 2>/dev/null && grep -q '^AD_VERSION=' "$out" &&
             verify_sum "$base" "abuse-defender.sh" "$out"; then
             v="$(grep -m1 '^AD_VERSION=' "$out" | cut -d'"' -f2)"
@@ -3052,11 +3009,9 @@ Options
       --force             accept lists that shrank a lot; block a country that contains
                           your gateway/DNS/SSH client (not recommended)
       --backend=B         auto | nft | ipset | iptables (this run)
-      --confirm-timeout=N seconds to confirm risky changes before auto-rollback
-      --no-confirm        apply without the interactive keep-rules prompt
+      --confirm-timeout=N seconds to confirm risky changes before auto-rollback (default 60)
       --keep-config       with uninstall: keep ${CONF_DIR#"$R"}
       --jitter=N          with update: random delay up to N seconds
-      --config=FILE       alternative config file
       --no-color          no colours (NO_COLOR is honoured too)
 
 Examples
@@ -3276,12 +3231,9 @@ main() {
         --backend=*) OPT_BACKEND="${1#*=}"; [[ $OPT_BACKEND =~ ^(auto|nft|ipset|iptables)$ ]] || die "invalid --backend" ;;
         --backend) shift; OPT_BACKEND="${1:-}"; [[ $OPT_BACKEND =~ ^(auto|nft|ipset|iptables)$ ]] || die "invalid --backend" ;;
         --confirm-timeout=*) OPT_CONFIRM_TIMEOUT="${1#*=}"; [[ $OPT_CONFIRM_TIMEOUT =~ ^[0-9]+$ ]] || die "invalid --confirm-timeout" ;;
-        --no-confirm) OPT_NO_CONFIRM=1 ;;
         --keep-config) OPT_KEEP_CONFIG=1 ;;
-        --sets-only) OPT_SETS_ONLY=1 ;;
         --jitter=*) OPT_JITTER="${1#*=}"; [[ $OPT_JITTER =~ ^[0-9]+$ ]] || die "invalid --jitter" ;;
         --jitter) shift; OPT_JITTER="${1:-0}"; [[ $OPT_JITTER =~ ^[0-9]+$ ]] || die "invalid --jitter" ;;
-        --config=*) CONF_FILE="${1#*=}" ;;
         --no-color) C_RED=""; C_GRN=""; C_YEL=""; C_BLU=""; C_BLD=""; C_OFF="" ;;
         -h|--help) usage; return 0 ;;
         -V|--version) say "abuse-defender $AD_VERSION"; return 0 ;;
