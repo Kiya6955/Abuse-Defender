@@ -111,9 +111,7 @@ logging, logging, or an optional module, the renderer retries at a lower feature
 **IPv6 is automatic.** IPv4 is always protected. IPv6 sets and rules are added only when
 the host has working IPv6 (`/proc/net/if_inet6` present, `disable_ipv6` not set) and the
 backend can filter it (nftables `inet` family, or ip6tables); otherwise the IPv6 parts
-(sets, ICMPv6/DHCPv6 exemptions, scan-guard sets) are simply not rendered. There is no
-setting for this on purpose: a wrong choice either leaves IPv6 open or tries to filter a
-family the host does not have.
+(sets, ICMPv6/DHCPv6 exemptions, scan-guard sets) are simply not rendered.
 
 ## 5. Safety model (what can lock you out, and why it does not)
 
@@ -129,7 +127,7 @@ family the host does not have.
 | DHCP lease renewal | DHCPv4/DHCPv6 returned early |
 | A bad rule set | `nft -c`/`iptables-restore --test` before applying; feature fallbacks |
 | A rule set that breaks connectivity anyway | connectivity self-test before and after (HTTPS to the first mirror, TCP 1.1.1.1:443 / IPv6, DNS lookup, ping gateway). Anything that worked before and fails after → automatic rollback |
-| The admin's own SSH breaks in a way the self-test cannot see | interactive changes ask the admin to open a **new** SSH session and type `yes` within `CONFIRM_TIMEOUT` (60 s). No answer, Ctrl+C, a lost terminal (SIGHUP) or a crash → rollback. A detached watchdog process (`_auto-rollback`) performs the rollback even if the main process is SIGKILLed |
+| The admin's own SSH breaks in a way the self-test cannot see | interactive changes ask the admin to open a **new** SSH session and type `yes` within 60 s (`--confirm-timeout`). No answer, Ctrl+C, a lost terminal (SIGHUP) or a crash → rollback. A detached watchdog process (`_auto-rollback`) performs the rollback even if the main process is SIGKILLed |
 | Whitelisting/blocking everything by typo | allow entries must be ≥ /8 (v4) or ≥ /16 (v6); block entries ≥ /4 or ≥ /7 |
 | Busy proxy: conntrack table full | warning when `nf_conntrack_count` > 70 % of `nf_conntrack_max`; `STATEFUL=no` documented |
 
@@ -144,12 +142,12 @@ timer ──► update --quiet
           for each needed list:
             for each mirror (raw.githubusercontent.com, cdn/fastly/gcore.jsdelivr.net, ...):
               curl -fsSL --proto =https --retry 2 --connect-timeout 10 --max-time 120 --max-filesize 50M
-              verify sha256 against <mirror>/lists/SHA256SUMS (if published; strict mode optional)
+              verify sha256 against <mirror>/lists/SHA256SUMS (when the file is listed there)
               mismatch → next mirror (jsDelivr caches can lag behind GitHub)
             external feeds (Spamhaus, abuse.ch, ipverse, ipdeny) fetched from their origin
             parse + validate every line (strict for our lists, ≤5 % junk for third-party)
             normalise (host bits), dedupe, aggregate
-            sanity: minimum size per list; refuse if it shrank more than MAX_SHRINK_PERCENT
+            sanity: minimum size per list; refuse if it lost more than half of its entries (--force accepts)
             ok → atomically replace /var/lib/abuse-defender/lists/<name>.txt
             fail → keep last good copy (or built-in copy) and exit 3 at the end
           if anything changed or rules are missing → build bundle → apply (atomic) → self-test
@@ -161,7 +159,9 @@ checked, then loaded in one transaction. A failed download can never remove prot
 Signatures: the lists come from the same repository and transport as the script itself
 (`bash <(curl ...)`), so a signature on the lists alone would not raise the bar against a
 compromised repository. SHA256SUMS protects against truncated/corrupted or mixed-version
-CDN responses. Strict mode (`VERIFY_CHECKSUMS=strict`) refuses unverified files.
+CDN responses. The download locations are a fixed internal list (GitHub raw first, then
+jsDelivr hosts, because some networks block raw.githubusercontent.com); they are not a
+setting.
 
 ## 7. Scan guard
 
@@ -215,7 +215,7 @@ one per line, derived from `lists/bogons-v4.txt` + `lists/abuse-v4.txt` (without
 Whenever the menu starts, or a command that changes settings or rules runs (as root),
 `auto_replace_old` looks for v1 artefacts (chains with DROP rules, the update script, its
 crontab line, the hosts lines) and for an older v2 (installed program with a lower
-`AD_VERSION`, or a config with renamed keys such as `IPV6`/`LANGUAGE`). Without asking it:
+`AD_VERSION`). Without asking it:
 
 1. imports the v1 custom/whitelist entries and takes an `iptables -S` snapshot of the
    v1 chains and jumps;
@@ -226,11 +226,6 @@ crontab line, the hosts lines) and for an older v2 (installed program with a low
    abuse-defender lines in rules.v4; on failure the snapshot is replayed so the v1
    protection is back exactly as it was;
 4. prints a summary of what was imported and removed (in the menu: under the header).
-
-Settings that no longer exist (`IP_FAMILY`, `MODE`, `IPV6`, `LANGUAGE`) are dropped
-silently when the config is read and the file is rewritten on the next upgrade or
-ensure run; a former `MODE=monitor` prints one line saying that monitor mode no longer
-exists and protection is enforced (use `disable` to switch it off).
 
 A v1 setup whose rules had already been cleared is only tidied up (nothing is
 installed). A newer installed program always wins: an older copy started by hand
@@ -268,8 +263,8 @@ still performs any pending rollback. Numeric choices, IP/CIDR input and country 
 are validated and asked again until they are valid; an empty answer cancels; end of
 input exits. Items are numbered 1-17 without gaps; item 4 toggles between "Disable
 protection (keeps settings)" and "Enable protection". Settings are shown read-only
-(item 15); advanced keys such as the download mirrors are edited in the config file or
-with `abuse-defender set KEY VALUE`. The explicit `menu` command reads answers from stdin
+(item 15); module tuning keys (port lists, scan-guard thresholds, ...) are edited in the
+config file or with `abuse-defender set KEY VALUE`. The explicit `menu` command reads answers from stdin
 when it is not a terminal, which is how the test-suite drives it. Colours are used only
 on a terminal and never when `NO_COLOR` is set.
 

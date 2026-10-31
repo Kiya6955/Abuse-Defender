@@ -53,7 +53,7 @@ removed is printed. If the new rules cannot be applied, the old ones stay in pla
 | Abuse Defender v2.0.0 - outbound abuse protection            |
 | https://github.com/Kiya6955/Abuse-Defender                   |
 +--------------------------------------------------------------+
-Protected: YES | backend: nft/inet | IPv4+IPv6 | updated: 2026-10-31 12:00 (ok) | timer: systemd update:active ensure:active
+Protected: YES | backend: nft/inet | IPv6: yes | updated: 2026-10-31 12:00 (ok) | timer: systemd update:active ensure:active
 
  Protection
    1) Install / re-apply protection
@@ -136,8 +136,7 @@ Exit codes: `0` ok, `1` error, `2` usage, `3` update partially failed (old lists
 | Export / import | - | config, whitelist, custom blocks and extra domains in one archive |
 
 Settings live in `/etc/abuse-defender/abuse-defender.conf` (documented, every key
-validated, never executed). Advanced keys such as the download mirrors are only set
-there; after editing the file run `abuse-defender apply`.
+validated, never executed). After editing the file by hand run `abuse-defender apply`.
 
 ### Country blocking
 
@@ -208,7 +207,7 @@ uses the tunnel interface and is not filtered. If you set `EGRESS_INTERFACES=all
 config file, also whitelist the overlay subnet.
 
 **My server has no IPv6.** Nothing to do: IPv6 rules are skipped automatically and the
-status line shows `IPv4 only (no IPv6 on this host)`.
+status line shows `IPv6: no (not available)`.
 
 **Which backend is used?** nftables when available (Debian 10+, Ubuntu 20.04+, RHEL 8+,
 Fedora, Arch, Alpine), otherwise ipset + iptables, otherwise plain iptables (OpenVZ/LXC).

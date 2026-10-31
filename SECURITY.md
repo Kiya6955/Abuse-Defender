@@ -21,7 +21,7 @@ maintainer can; fixes are released as a new version and noted in CHANGELOG.md.
   for `install` / `self-update`) comes from this repository through HTTPS mirrors. The
   `SHA256SUMS` file protects against corrupted or inconsistent downloads, not against
   a compromised repository - review changes before running `self-update` on critical
-  systems, or pin your own mirror with `MIRRORS=` in the config.
+  systems.
 - Third-party feeds (Spamhaus, abuse.ch, ipverse, ipdeny) are parsed as data only:
   every line must be a valid CIDR, broad ranges and loopback/link-local/multicast are
   refused, and nothing from a feed is ever executed or interpolated into a shell command.

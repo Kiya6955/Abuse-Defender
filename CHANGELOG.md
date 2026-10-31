@@ -17,7 +17,7 @@ still opens the menu.
 - Non-interactive CLI for scripts: `install update apply status doctor list block
   unblock whitelist unwhitelist category geo module set config hits enable disable
   export import selftest self-update validate uninstall menu`, with `--yes --dry-run
-  --quiet --force --backend --confirm-timeout --no-confirm`.
+  --quiet --force --backend --confirm-timeout`.
 - nftables backend (own table `inet abuse_defender`), ipset backend and plain iptables
   fallback, chosen automatically after probing the running kernel.
 - IPv6 protection (IANA IPv6 special-purpose bogons) that never touches link-local,
