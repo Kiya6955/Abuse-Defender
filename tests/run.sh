@@ -178,7 +178,13 @@ test_cli_basics() {
     printf '1.2.3.0/24\n999.1.1.1\n' >"$T/l.txt"; run_ad validate "$T/l.txt"; assert_rc $? 3 "validate bad"
     run_ad status; assert_rc $? 0 "status when not installed"; assert_grep "$T/out" 'Protected: NO \(not installed\)'
     run_ad update; assert_rc $? 1 "update refuses when not installed"; assert_grep "$T/out" 'not installed'
-    run_ad config; assert_rc $? 0 "config"; assert_grep "$T/out" '^IP_FAMILY="both"$'; assert_grep "$T/out" '^MODE="enforce"$'
+    run_ad config; assert_rc $? 0 "config"; assert_grep "$T/out" '^ENABLED="yes"$'
+    assert_nogrep "$T/out" '^(IP_FAMILY|MODE|LANGUAGE)=' "removed settings are gone"
+    run_ad --family=4 status; assert_rc $? 1 "--family was removed"
+    run_ad --no-ipv6 status; assert_rc $? 1 "--no-ipv6 was removed"
+    run_ad mode monitor; assert_rc $? 1 "mode command was removed"
+    run_ad family 4; assert_rc $? 1 "family command was removed"
+    run_ad --help; assert_nogrep "$T/out" 'monitor|family|--family' "help mentions no removed feature"
 }
 
 test_install_nft() {
@@ -213,14 +219,14 @@ test_install_nft() {
     assert_grep "$R/etc/hosts" '^::1 pushnotificationws\.com$'
     assert_grep "$R/etc/hosts" '^203\.0\.113\.5 vps1$' "foreign hosts lines kept"
     run_ad status; assert_rc $? 0 "status"
-    assert_grep "$T/out" '^Protected: YES \| backend: nft/inet \| IPv4\+IPv6 \| mode: enforce \| updated: .* \| timer: systemd' "one-line status"
+    assert_grep "$T/out" '^Protected: YES \| backend: nft/inet \| IPv4\+IPv6 \| updated: .* \| timer: systemd' "one-line status"
     assert_grep "$T/out" 'bogons +6 pkts' "counters shown (v4+v6)"
 }
 
 test_dry_run_output() {
     local s1 s2; s1="$(snapshot)"
     run_ad --dry-run --yes install; assert_rc $? 0 "dry-run install: $(tail -n 3 "$T/out")"
-    assert_grep "$T/out" '^----- dry-run: backend=nft/inet IPv4\+IPv6 mode=enforce egress=eth0' "dry-run header"
+    assert_grep "$T/out" '^----- dry-run: backend=nft/inet IPv4\+IPv6 egress=eth0 -----$' "dry-run header"
     assert_grep "$T/out" 'set bogons_v4 \(block\): 13 entries' "dry-run lists set sizes"
     assert_grep "$T/out" '^  chain egress \{' "dry-run shows the ruleset"
     assert_grep "$T/out" '172\.31\.1\.1/32 gateway' "dry-run shows the auto-whitelist"
@@ -230,7 +236,8 @@ test_dry_run_output() {
     run_ad --yes install >/dev/null
     run_ad --dry-run --yes block 203.0.113.0/24; assert_grep "$T/out" 'would add 203\.0\.113\.0/24'
     assert_nogrep "$R/etc/abuse-defender/custom-block.txt" '203\.0\.113' "dry-run block changed nothing"
-    run_ad --dry-run --yes --family=4 apply; assert_grep "$T/out" 'dry-run: backend=nft/inet IPv4 only'
+    rm -f "$R/proc/net/if_inet6"
+    run_ad --dry-run --yes apply; assert_grep "$T/out" 'dry-run: backend=nft/inet IPv4 only \(no IPv6 on this host\)' "IPv6 is skipped automatically"
 }
 
 test_idempotent_install() {
@@ -307,14 +314,16 @@ test_auto_replace_v1_leftovers() {
 test_upgrade_old_v2() {
     run_ad --yes install >/dev/null || { bad "install"; return; }
     sed 's/^AD_VERSION=.*/AD_VERSION="1.9.0"/' "$SCRIPT" >"$R/usr/local/sbin/abuse-defender"
-    printf 'IPV6="no"\nLANGUAGE="fa"\n' >>"$R/etc/abuse-defender/abuse-defender.conf"
+    printf 'IPV6="no"\nLANGUAGE="fa"\nIP_FAMILY="4"\nMODE="monitor"\n' >>"$R/etc/abuse-defender/abuse-defender.conf"
     run_ad --yes whitelist 10.20.0.0/16; assert_rc $? 0 "command on an older install: $(tail -n 3 "$T/out")"
     assert_grep "$T/out" 'found Abuse Defender v1\.9\.0 - upgrading to v2\.'
+    assert_eq "$(count "$T/out" 'monitor mode no longer exists')" 1 "one notice about the removed monitor mode"
     assert_grep "$R/usr/local/sbin/abuse-defender" '^AD_VERSION="2\.' "program upgraded"
-    assert_grep "$R/etc/abuse-defender/abuse-defender.conf" '^IP_FAMILY="4"$' "IPV6=no migrated to IP_FAMILY=4"
-    assert_nogrep "$R/etc/abuse-defender/abuse-defender.conf" '^(LANGUAGE|IPV6)=' "obsolete keys dropped"
+    assert_nogrep "$R/etc/abuse-defender/abuse-defender.conf" '^(LANGUAGE|IPV6|IP_FAMILY|MODE)=' "obsolete keys dropped"
+    assert_grep "$R/etc/abuse-defender/abuse-defender.conf" '^ENABLED="yes"$' "still enabled"
     assert_grep "$R/etc/abuse-defender/whitelist.txt" '^10\.20\.0\.0/16$'
-    assert_nogrep "$(RS)" 'ip6 daddr' "IPv4 only after migration"
+    assert_grep "$(RS)" 'ip6 daddr @bogons_v6' "IPv6 automatic again (old IP_FAMILY=4 ignored)"
+    assert_grep "$(RS)" 'bogons_v4 counter drop' "enforced (old MODE=monitor ignored)"
 }
 
 test_newer_installed_wins() {
@@ -322,6 +331,66 @@ test_newer_installed_wins() {
     printf '#!/usr/bin/env bash\nAD_VERSION="9.9.9"\necho "newer program ran: $*"\n' >"$R/usr/local/sbin/abuse-defender"
     chmod +x "$R/usr/local/sbin/abuse-defender"
     run_ad status; assert_grep "$T/out" 'newer program ran: status' "an older copy hands over to the newer installed program"
+}
+
+test_obsolete_config_keys() {
+    run_ad --yes install >/dev/null || { bad "install"; return; }
+    printf 'IP_FAMILY="6"\nMODE="monitor"\nLANGUAGE="fa"\nIPV6="no"\n' >>"$R/etc/abuse-defender/abuse-defender.conf"
+    run_ad status; assert_rc $? 0 "status with obsolete keys"
+    assert_eq "$(count "$T/out" 'monitor mode no longer exists - protection is enforced')" 1 "monitor notice printed once"
+    assert_nogrep "$T/out" 'unknown key' "obsolete keys are dropped silently"
+    run_ad ensure; assert_rc $? 0 "ensure rewrites the config"
+    assert_nogrep "$R/etc/abuse-defender/abuse-defender.conf" '^(LANGUAGE|IPV6|IP_FAMILY|MODE)=' "obsolete keys removed from the file"
+    run_ad status; assert_nogrep "$T/out" 'monitor mode' "notice is shown only until the config is rewritten"
+    assert_grep "$T/out" 'Protected: YES'
+}
+
+geo_country() {   # geo_country CC "v4 prefixes" "v6 prefixes": publish a fake country list on both mirrors
+    local cc=$1 v4=$2 v6=$3 mm
+    for mm in "$F/www/raw.githubusercontent.com/Kiya6955/Abuse-Defender/main" "$F/www/cdn.jsdelivr.net/gh/Kiya6955/Abuse-Defender@main"; do
+        mkdir -p "$mm/lists/geo"
+        # word splitting is intended: the arguments are space-separated prefix lists
+        # shellcheck disable=SC2086
+        printf '%s\n' $v4 >"$mm/lists/geo/$cc-v4.txt"
+        # shellcheck disable=SC2086
+        printf '%s\n' $v6 >"$mm/lists/geo/$cc-v6.txt"
+    done
+}
+
+test_geo_guard() {
+    run_ad --yes geo add ir; assert_rc $? 1 "geo add before install"; assert_grep "$T/out" 'install and enable protection first'
+    run_ad --yes install >/dev/null || { bad "install"; return; }
+    run_ad geo add ir; assert_rc $? 1 "geo add without --yes and without a terminal is refused"
+    assert_grep "$T/out" 'This blocks ALL outbound traffic to IR: [0-9]+ IPv4 \+ [0-9]+ IPv6 prefixes\. Services hosted there become unreachable'
+    assert_grep "$T/out" 'Re-run with --yes'
+    assert_nogrep "$R/etc/abuse-defender/abuse-defender.conf" '^GEO_COUNTRIES="ir"' "not enabled without confirmation"
+    assert_nogrep "$(RS)" 'geo_ir' "no rules without confirmation"
+    run_ad --dry-run geo add ir; assert_rc $? 0 "dry-run geo add"; assert_grep "$T/out" '\[dry-run\] This blocks ALL outbound traffic to IR: 1747 IPv4'
+    run_ad_input '12\n1\nir\nn\n0\n0\n' menu; assert_grep "$T/out" 'cancelled - nothing changed' "menu: answering no cancels"
+    assert_nogrep "$R/etc/abuse-defender/abuse-defender.conf" '^GEO_COUNTRIES="ir"'
+    # the default gateway (172.31.1.1) is inside the country -> refused unless --force
+    geo_country zz "172.16.0.0/12 5.0.0.0/8" "2a00::/16"
+    run_ad --yes geo add zz; assert_rc $? 1 "country containing the gateway refused"
+    assert_grep "$T/out" '172\.31\.1\.1/32 default-gateway'
+    assert_grep "$T/out" "refusing to block 'ZZ': it would cut off your gateway/DNS/SSH session"
+    assert_nogrep "$R/etc/abuse-defender/abuse-defender.conf" 'GEO_COUNTRIES="zz"'
+    # the current SSH client (198.51.100.77) is inside the country -> refused
+    geo_country yy "198.51.100.0/24" ""
+    run_ad --yes geo add yy; assert_rc $? 1 "country containing the SSH client refused"; assert_grep "$T/out" '198\.51\.100\.77/32 ssh-client'
+    # an IPv6 DNS resolver (2001:4860:4860::8888) is inside the country -> refused
+    geo_country xx "5.0.0.0/8" "2001:4860::/32"
+    run_ad --yes geo add xx; assert_rc $? 1 "country containing an IPv6 resolver refused"; assert_grep "$T/out" '2001:4860:4860::8888/128 dns-resolver'
+    # --force overrides
+    run_ad --yes --force geo add zz; assert_rc $? 0 "--force overrides: $(tail -n 3 "$T/out")"
+    assert_grep "$T/out" '--force given'
+    assert_grep "$R/etc/abuse-defender/abuse-defender.conf" '^GEO_COUNTRIES="zz"$'
+    assert_grep "$R/var/lib/abuse-defender/applied/auto-allow.txt" '^172\.31\.1\.1/32 gateway' "gateway stays exempt"
+    # download failure: not enabled
+    run_ad --yes geo add qq; assert_rc $? 1 "unknown country"; assert_grep "$T/out" "could not download a valid list for 'qq' - country blocking NOT enabled"
+    assert_nogrep "$R/etc/abuse-defender/abuse-defender.conf" 'qq'
+    # a clean country with --yes works
+    run_ad --yes geo add ir; assert_rc $? 0 "geo add ir --yes"; assert_grep "$T/out" 'country IR blocked'
+    assert_grep "$(RS)" 'set geo_ir_v4'
 }
 
 test_migration_to_ipset() {
@@ -357,49 +426,7 @@ test_plain_iptables_backend() {
     assert_nogrep "$st" 'abuse-defender-abuse' "disabled category chain removed"
 }
 
-test_family_modes() {
-    run_ad --yes install >/dev/null || { bad "install"; return; }
-    run_ad --yes family 4; assert_rc $? 0 "family 4"
-    assert_nogrep "$(RS)" 'ip6 daddr|ipv6_addr|icmpv6' "IPv4 only: no IPv6 rules"
-    assert_grep "$(RS)" ' ip daddr @bogons_v4'
-    run_ad status; assert_grep "$T/out" '\| IPv4 only \|'
-    run_ad --yes family 6; assert_rc $? 0 "family 6"
-    assert_nogrep "$(RS)" ' ip daddr|ipv4_addr|udp sport 68' "IPv6 only: no IPv4 rules"
-    assert_grep "$(RS)" 'ip6 daddr @bogons_v6'
-    run_ad status; assert_grep "$T/out" '\| IPv6 only \|'
-    run_ad --yes family both; assert_grep "$(RS)" ' ip daddr @bogons_v4'; assert_grep "$(RS)" 'ip6 daddr @bogons_v6'
-    run_ad --yes family 7; assert_rc $? 1 "invalid family refused"
-    # IPv6-only on a host without IPv6 is refused
-    rm -f "$R/proc/net/if_inet6"
-    run_ad --yes family 6; assert_rc $? 1 "IPv6-only refused without IPv6"; assert_grep "$T/out" 'no working IPv6'
-    # iptables backends
-    new_env ipset
-    run_ad --yes --family=6 install; assert_rc $? 0 "ipset IPv6-only install: $(tail -n 3 "$T/out")"
-    assert_nogrep "$F/ipt4.state" 'abuse-defender' "IPv6-only: nothing in iptables (v4)"
-    assert_grep "$F/ipt6.state" '^-A OUTPUT -o eth0 -j abuse-defender$'
-    new_env ipset
-    run_ad --yes --family=4 install; assert_rc $? 0 "ipset IPv4-only install"
-    assert_nogrep "$F/ipt6.state" 'abuse-defender' "IPv4-only: nothing in ip6tables"
-}
 
-test_monitor_mode() {
-    run_ad --yes install >/dev/null || { bad "install"; return; }
-    run_ad --yes mode monitor; assert_rc $? 0 "mode monitor"
-    assert_nogrep "$(RS)" 'counter drop' "monitor mode drops nothing"
-    assert_grep "$(RS)" 'log prefix "AD-MON bogons: "'
-    assert_grep "$(RS)" 'bogons_v4 counter comment "bogons"'
-    run_ad status; assert_grep "$T/out" 'Protected: MONITOR ONLY'; assert_grep "$T/out" 'counted, NOT dropped'
-    run_ad --yes mode enforce; assert_grep "$(RS)" 'bogons_v4 counter drop'
-    run_ad --yes mode loud; assert_rc $? 1 "invalid mode refused"
-    new_env ipset
-    run_ad --yes install >/dev/null; run_ad --yes mode monitor
-    assert_grep "$F/ipt4.state" '^-A abuse-defender -m set --match-set ad4-bogons dst$' "counting rule without DROP"
-    assert_grep "$F/ipt4.state" 'AD-MON bogons'
-    assert_nogrep "$F/ipt4.state" 'ad4-bogons dst -j DROP'
-    new_env iptables
-    run_ad --yes install >/dev/null; run_ad --yes mode monitor
-    assert_grep "$F/ipt4.state" '^-A abuse-defender-drop -j RETURN$' "plain backend: monitor returns instead of dropping"
-}
 
 test_doctor() {
     run_ad doctor; assert_rc $? 0 "doctor before install: warnings only"; assert_grep "$T/out" '\[WARN\] not installed'
@@ -553,7 +580,6 @@ test_uninstall_clean() {
         run_ad --yes install >/dev/null || { bad "install ($be): $(tail -n 5 "$T/out")"; continue; }
         run_ad --yes whitelist 10.9.0.0/16 >/dev/null
         run_ad --yes module scanguard on >/dev/null
-        run_ad --yes mode monitor >/dev/null
         run_ad uninstall; assert_rc $? 1 "uninstall without --yes when non-interactive must refuse"
         run_ad --yes uninstall; assert_rc $? 0 "uninstall ($be)"
         local after; after="$(snapshot)"
@@ -573,15 +599,15 @@ test_v1_only_uninstall() {
 test_export_import() {
     run_ad --yes install >/dev/null || { bad "install"; return; }
     run_ad --yes block 198.18.5.0/24 >/dev/null
-    run_ad --yes mode monitor >/dev/null
+    run_ad --yes module smtp on >/dev/null
     run_ad export "$T/s.tgz"; assert_rc $? 0 "export"; assert_file "$T/s.tgz"
     tar -tzf "$T/s.tgz" >"$T/list"; assert_nogrep "$T/list" 'var/lib' "export contains settings only"
     run_ad --yes unblock 198.18.5.0/24 >/dev/null
-    run_ad --yes mode enforce >/dev/null
+    run_ad --yes module smtp off >/dev/null
     run_ad --yes import "$T/s.tgz"; assert_rc $? 0 "import: $(tail -n 3 "$T/out")"
     assert_grep "$R/etc/abuse-defender/custom-block.txt" '^198\.18\.5\.0/24$'
-    assert_grep "$R/etc/abuse-defender/abuse-defender.conf" '^MODE="monitor"$'
-    assert_grep "$(RS)" 'AD-MON' "imported settings applied"
+    assert_grep "$R/etc/abuse-defender/abuse-defender.conf" '^BLOCK_SMTP="yes"$'
+    assert_grep "$(RS)" 'comment "smtp"' "imported settings applied"
     mkdir -p "$T/evil/etc"; echo x >"$T/evil/etc/passwd"
     tar -C "$T/evil" -czf "$T/evil.tgz" etc/passwd
     run_ad --yes import "$T/evil.tgz"; assert_rc $? 1 "evil archive refused"; assert_grep "$T/out" 'refusing archive'
@@ -594,11 +620,10 @@ test_hits() {
     cat >"$F/dmesg" <<'EOF'
 [100.1] AD-DROP bogons: IN= OUT=eth0 SRC=203.0.113.5 DST=10.1.2.3 LEN=60 PROTO=TCP SPT=40000 DPT=445 UID=1001 GID=1001
 [100.2] AD-DROP bogons: IN= OUT=eth0 SRC=203.0.113.5 DST=10.1.2.4 LEN=60 PROTO=TCP SPT=40001 DPT=445 UID=1001 GID=1001
-[100.3] AD-MON abuse: IN= OUT=eth0 SRC=203.0.113.5 DST=25.1.1.1 LEN=60 PROTO=TCP SPT=40002 DPT=22 UID=0 GID=0
+[100.3] AD-DROP abuse: IN= OUT=eth0 SRC=203.0.113.5 DST=25.1.1.1 LEN=60 PROTO=TCP SPT=40002 DPT=22 UID=0 GID=0
 EOF
     run_ad hits 5; assert_rc $? 0 "hits"
     assert_grep "$T/out" '2  bogons'; assert_grep "$T/out" '1  abuse'; assert_grep "$T/out" '2  445'; assert_grep "$T/out" '2  1001'
-    assert_grep "$T/out" 'AD-MON come from monitor mode'
 }
 
 test_disable_enable() {
@@ -619,53 +644,64 @@ test_geo() {
 }
 
 test_menu_flow() {
-    # install, invalid choice, invalid IP + re-prompt, whitelist, family, mode, preview, doctor, exit
     local input='1\ny\nyes\n\n'          # 1 install -> Continue? y -> keep rules? yes -> Enter
-    input+='99\n6\n999.1.1.1\n10.9.0.0/16\n\n'  # bad choice, whitelist with an invalid then a valid IP
-    input+='13\n2\nyes\n\n'              # IP family -> IPv4 only -> confirm -> Enter
-    input+='14\n2\nyes\n\n'              # mode -> monitor -> confirm -> Enter
-    input+='12\n1\nyes\n0\n'             # modules -> toggle smtp -> confirm -> back
-    input+='10\n3\nyes\n0\n'             # categories -> toggle spamhaus -> confirm -> back
-    input+='5\n\n'                       # dry-run preview
-    input+='4\n\n'                       # doctor
+    input+='99\n7\n999.1.1.1\n10.9.0.0/16\n\n'  # bad choice, whitelist with an invalid then a valid IP
+    input+='13\n1\nyes\n0\n'             # modules -> toggle smtp -> confirm -> back
+    input+='11\n3\nyes\n0\n'             # categories -> toggle spamhaus -> confirm -> back
+    input+='12\n1\nir\ny\nyes\n0\n'      # country -> add ir -> confirm block -> keep rules -> back
+    input+='6\n\n'                       # dry-run preview
+    input+='5\n\n'                       # doctor
     input+='3\n\n'                       # status
+    input+='15\n\n'                      # show settings
+    input+='4\ny\n\n'                    # disable -> confirm
+    input+='4\nyes\n\n'                  # enable -> keep rules
     input+='0\n'
     run_ad_input "$input" --confirm-timeout=5 menu; assert_rc $? 0 "menu session: $(tail -n 5 "$T/out")"
     cp "$T/out" "$T/menu.out"
-    assert_grep "$T/menu.out" '^\+-+\+$' "header box"
-    assert_grep "$T/menu.out" '^Protected: YES' "status line after install"
-    assert_grep "$T/menu.out" 'please enter a number between 0 and 19' "invalid menu choice re-prompts"
-    assert_grep "$T/menu.out" "'999\.1\.1\.1' is not accepted" "invalid IP re-prompts"
+    local m="$T/menu.out" c="$R/etc/abuse-defender/abuse-defender.conf"
+    assert_grep "$m" '^\+-+\+$' "header box"
+    assert_grep "$m" '^Protected: YES \| backend: nft/inet \| IPv4\+IPv6 \| updated: ' "status line after install"
+    assert_grep "$m" '^   4\) Disable protection \(keeps settings\)$' "enable/disable is item 4"
+    assert_grep "$m" '^   4\) Enable protection$' "item 4 turns into Enable when disabled"
+    assert_grep "$m" '^  16\) Export / import settings       17\) Uninstall completely$' "contiguous numbering up to 17"
+    assert_grep "$m" 'Choose \[0-17\]: ' "prompt range"
+    assert_nogrep "$m" 'Mode \(|IP family|Mirrors and other settings|monitor' "removed menu items are gone"
+    assert_grep "$m" 'please enter a number between 0 and 17' "invalid menu choice re-prompts"
+    assert_grep "$m" "'999\.1\.1\.1' is not accepted" "invalid IP re-prompts"
     assert_grep "$R/etc/abuse-defender/whitelist.txt" '^10\.9\.0\.0/16$' "whitelist via menu"
-    assert_grep "$R/etc/abuse-defender/abuse-defender.conf" '^IP_FAMILY="4"$' "family via menu"
-    assert_grep "$R/etc/abuse-defender/abuse-defender.conf" '^MODE="monitor"$' "mode via menu"
-    assert_grep "$R/etc/abuse-defender/abuse-defender.conf" '^BLOCK_SMTP="yes"$' "module via menu"
-    assert_grep "$R/etc/abuse-defender/abuse-defender.conf" '^CATEGORIES="bogons abuse spamhaus"$' "category via menu"
-    assert_grep "$T/menu.out" 'dry-run: backend=nft/inet IPv4 only mode=monitor' "preview via menu"
-    assert_grep "$T/menu.out" 'Summary: [0-9]+ failure' "doctor via menu"
-    assert_grep "$T/menu.out" 'Bye\.' "clean exit"
-    assert_grep "$(RS)" 'AD-MON' "monitor mode applied"
+    assert_grep "$c" '^BLOCK_SMTP="yes"$' "module via menu"
+    assert_grep "$c" '^CATEGORIES="bogons abuse spamhaus"$' "category via menu"
+    assert_grep "$m" 'This blocks ALL outbound traffic to IR' "country confirmation shown"
+    assert_grep "$c" '^GEO_COUNTRIES="ir"$' "country via menu"
+    assert_grep "$m" 'dry-run: backend=nft/inet IPv4\+IPv6 egress=eth0' "preview via menu"
+    assert_grep "$m" 'Summary: [0-9]+ failure' "doctor via menu"
+    assert_grep "$m" '^MIRRORS="https://' "show settings via menu (read-only)"
+    assert_grep "$m" 'protection disabled' "disable via menu"
+    assert_grep "$c" '^ENABLED="yes"$' "enabled again via menu"
+    assert_file "$(RS)"
+    assert_grep "$(RS)" 'set geo_ir_v4'
+    assert_grep "$m" 'Bye\.' "clean exit"
     # end of input never loops forever
-    run_ad_input '6\n' menu; assert_rc $? 0 "menu exits at end of input"
-    # a 'no' at the keep-rules prompt rolls back
+    run_ad_input '7\n' menu; assert_rc $? 0 "menu exits at end of input"
+    # a 'no' at the keep-rules prompt rolls back rules and setting
     cp "$(RS)" "$T/rs.before"
-    run_ad_input '12\n2\nno\n0\n0\n' --confirm-timeout=5 menu
+    run_ad_input '13\n2\nno\n0\n0\n' --confirm-timeout=5 menu
     assert_grep "$T/out" 'not confirmed - the previous rules were restored'
     cmp -s "$T/rs.before" "$(RS)" && ok || bad "rules not rolled back after 'no'"
-    assert_grep "$R/etc/abuse-defender/abuse-defender.conf" '^BLOCK_PORTS="no"$' "the unconfirmed setting is reverted too"
+    assert_grep "$c" '^BLOCK_PORTS="no"$' "the unconfirmed setting is reverted too"
     assert_grep "$T/out" 'settings restored to their previous values'
 }
 
 test_menu_uninstall() {
     run_ad --yes install >/dev/null || { bad "install"; return; }
-    run_ad_input '19\nn\n\n0\n' menu; assert_file "$R/usr/local/sbin/abuse-defender"; assert_grep "$T/out" 'cancelled'
-    run_ad_input '19\ny\n\n0\n' menu; assert_no_file "$R/usr/local/sbin/abuse-defender"; assert_no_file "$(RS)"
+    run_ad_input '17\nn\n\n0\n' menu; assert_file "$R/usr/local/sbin/abuse-defender"; assert_grep "$T/out" 'cancelled'
+    run_ad_input '17\ny\n\n0\n' menu; assert_no_file "$R/usr/local/sbin/abuse-defender"; assert_no_file "$(RS)"
 }
 
 # ---------------------------------------------------------------- runner
 ALL=(list_parsing build_lists_check cli_basics install_nft dry_run_output idempotent_install migration_to_nft
      auto_replace_v1_menu auto_replace_v1_failure_keeps_old auto_replace_v1_leftovers upgrade_old_v2 newer_installed_wins
-     migration_to_ipset plain_iptables_backend family_modes monitor_mode doctor input_validation
+     obsolete_config_keys geo_guard migration_to_ipset plain_iptables_backend doctor input_validation
      rollback_on_selftest_failure render_fallback_levels modules update_logic fresh_offline_install
      legacy_list_fallback no_ipv6_host no_default_route alpine_and_none uninstall_clean v1_only_uninstall
      export_import hits disable_enable geo menu_flow menu_uninstall)
