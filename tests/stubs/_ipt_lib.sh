@@ -34,10 +34,21 @@ feature_ok() {
     return 0
 }
 
+# like iptables-nft: every set named by --match-set / --add-set must already exist
+# (this is checked for iptables-restore --test too)
+sets_ok() {
+    local spec=$1 sn
+    while read -r sn; do
+        [[ -z "$sn" || -f "$AD_FAKE/ipset/$sn" ]] || { echo "iptables-restore v1.8.10 (nf_tables): Set $sn doesn't exist." >&2; return 1; }
+    done < <(awk '{ for (i=1;i<NF;i++) if ($i=="--match-set" || $i=="--add-set") print $(i+1) }' <<<"$spec")
+    return 0
+}
+
 add_rule() {   # add_rule STATE CHAIN SPEC
     local st=$1 ch=$2 spec=$3
     chain_exists "$ch" "$st" || { echo "iptables: No chain/target/match by that name ($ch)" >&2; return 1; }
     target_ok "$spec" "$st" || { echo "iptables: target in '$spec' does not exist" >&2; return 1; }
+    sets_ok "$spec" || return 1
     feature_ok "$spec" || { echo "iptables: Couldn't load match/target (stub)" >&2; return 1; }
     printf -- '-A %s %s\n' "$ch" "$spec" >>"$st"
 }

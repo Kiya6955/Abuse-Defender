@@ -1373,16 +1373,30 @@ bundle_build() {
         if [[ $BACKEND == nft ]]; then
             nft -c -f "$dir/ruleset.nft" >"$dir/check.log" 2>&1 || rc=$?
         else
+            if [[ $BACKEND == ipset ]]; then
+                # iptables-nft checks that every referenced set exists, even with --test
+                if [[ $DRY_RUN -eq 1 ]]; then
+                    if [[ -n "$(ipset_missing "$dir")" ]]; then
+                        RENDER_NOTES+=("dry-run: kernel pre-check skipped - the ipsets are created on the first real apply")
+                        break
+                    fi
+                elif ! ipset_ensure_sets "$dir"; then
+                    err "could not create the ipsets"
+                    return 1
+                fi
+            fi
             local f
             for f in 4 6; do
                 [[ -f "$dir/rules$f.ipt" ]] || continue
-                # --test does not need the ipsets to exist
                 ipt_restore "$f" --test --noflush <"$dir/rules$f.ipt" >"$dir/check.log" 2>&1 || { rc=1; break; }
             done
         fi
         [[ $rc -eq 0 ]] && break
         if (( level >= 3 )); then
             err "the rendered ruleset was rejected by the kernel/tooling:"; sed 's/^/    /' "$dir/check.log" >&2 || true
+            local sn
+            for sn in $IPSETS_CREATED; do ipset destroy "$sn" >/dev/null 2>&1 || true; done
+            IPSETS_CREATED=""
             return 1
         fi
         case $level in
@@ -1489,22 +1503,55 @@ ipt_apply_jumps() {
     done
 }
 
-ipset_apply() {
-    local dir=$1 sn fam name kind famname maxe cnt existing
+# ipset_create_line NAME FAM SET DIR -> the "ipset restore" line that creates the set
+ipset_create_line() {
+    local sn=$1 fam=$2 name=$3 dir=$4 famname=inet cnt maxe=65536
+    [[ $fam == 6 ]] && famname=inet6
+    if [[ $name == dynamic ]]; then
+        printf 'create %s hash:ip,port family %s timeout 600 maxelem 262144\n' "$sn" "$famname"
+        return 0
+    fi
+    cnt="$(count_lines "$dir/sets/$name")"
+    (( cnt * 2 > maxe )) && maxe=$((cnt * 2))
+    printf 'create %s hash:net family %s hashsize 1024 maxelem %s\n' "$sn" "$famname" "$maxe"
+}
+
+ipset_missing() {   # names referenced by the bundle that do not exist in the kernel yet
+    local dir=$1 existing sn
     [[ -s "$dir/ipsets.txt" ]] || return 0
+    existing="$(ipset list -n 2>/dev/null || true)"
+    while read -r sn _; do
+        if ! grep -Fxq -- "$sn" <<<"$existing"; then echo "$sn"; fi
+    done <"$dir/ipsets.txt"
+}
+
+# Create (empty, final names) every set the rendered rules reference. iptables-nft resolves
+# "--match-set"/"--add-set" when the rules are loaded - even for iptables-restore --test - so
+# the sets must exist before the pre-check and before the real restore. Contents are filled
+# later by ipset_apply with an atomic swap.
+IPSETS_CREATED=""
+ipset_ensure_sets() {
+    local dir=$1 missing sn fam name
+    missing="$(ipset_missing "$dir")"
+    [[ -n "$missing" ]] || return 0
+    while read -r sn fam name; do
+        if grep -Fxq -- "$sn" <<<"$missing"; then ipset_create_line "$sn" "$fam" "$name" "$dir"; fi
+    done <"$dir/ipsets.txt" >"$dir/ipset.create"
+    ipset restore <"$dir/ipset.create" || return 1
+    IPSETS_CREATED="${IPSETS_CREATED:+$IPSETS_CREATED }$(tr '\n' ' ' <<<"$missing")"
+    IPSETS_CREATED="${IPSETS_CREATED%% }"
+}
+
+ipset_apply() {
+    local dir=$1 sn fam name existing
+    [[ -s "$dir/ipsets.txt" ]] || return 0
+    ipset_ensure_sets "$dir" || return 1
     existing="$(ipset list -n 2>/dev/null || true)"
     {
         while read -r sn fam name; do
-            famname=inet; [[ $fam == 6 ]] && famname=inet6
-            if [[ $name == dynamic ]]; then
-                grep -Fxq -- "$sn" <<<"$existing" || printf 'create %s hash:ip,port family %s timeout 600 maxelem 262144\n' "$sn" "$famname"
-                continue
-            fi
-            cnt="$(count_lines "$dir/sets/$name")"; maxe=65536
-            (( cnt * 2 > maxe )) && maxe=$((cnt * 2))
-            grep -Fxq -- "$sn" <<<"$existing" || printf 'create %s hash:net family %s hashsize 1024 maxelem %s\n' "$sn" "$famname" "$maxe"
-            grep -Fxq -- "$sn-n" <<<"$existing" && printf 'destroy %s-n\n' "$sn"
-            printf 'create %s-n hash:net family %s hashsize 1024 maxelem %s\n' "$sn" "$famname" "$maxe"
+            [[ $name == dynamic ]] && continue
+            if grep -Fxq -- "$sn-n" <<<"$existing"; then printf 'destroy %s-n\n' "$sn"; fi
+            ipset_create_line "$sn-n" "$fam" "$name" "$dir"
             sed "s/^/add $sn-n /" "$dir/sets/$name"
             printf 'swap %s-n %s\ndestroy %s-n\n' "$sn" "$sn" "$sn"
         done <"$dir/ipsets.txt"

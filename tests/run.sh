@@ -392,6 +392,42 @@ test_migration_to_ipset() {
     assert_eq "$(count "$st" '^-A OUTPUT -o eth0 -j abuse-defender$')" 1 "still exactly one jump"
 }
 
+nsets() {   # nsets [SUFFIX]: number of abuse-defender ipsets (ad4-*/ad6-*) in the stub state
+    local n=0 f
+    for f in "$F"/ipset/ad[46]-*"${1:-}"; do [[ -e "$f" ]] && n=$((n + 1)); done
+    echo "$n"
+}
+
+test_ipset_sets_before_check() {
+    # iptables-nft refuses rules (even with --test) that name a set which does not exist yet
+    new_env ipset
+    run_ad --dry-run --yes install; assert_rc $? 0 "dry-run on a fresh ipset host: $(tail -n 3 "$T/out")"
+    assert_grep "$T/out" 'kernel pre-check skipped - the ipsets are created on the first real apply'
+    assert_eq "$(nsets)" 0 "dry-run creates no ipsets"
+    : >"$F/calls.log"
+    run_ad --yes install; assert_rc $? 0 "fresh ipset install: $(tail -n 3 "$T/out")"
+    local c t
+    c="$(grep -n '^ipset restore' "$F/calls.log" | head -n1 | cut -d: -f1)"
+    t="$(grep -n '^iptables-restore --test' "$F/calls.log" | head -n1 | cut -d: -f1)"
+    [[ -n "$c" && -n "$t" && $c -lt $t ]] && ok || bad "sets must be created ($c) before the first pre-check ($t)"
+    assert_file "$F/ipset/ad4-allow"; assert_file "$F/ipset/ad4-bogons"; assert_file "$F/ipset/ad6-bogons"
+    assert_grep "$F/ipset/ad4-bogons" '^10\.0\.0\.0/8$' "contents filled after the swap"
+    run_ad --yes module scanguard on; assert_rc $? 0 "scan guard on ipset"
+    assert_file "$F/ipset/ad4-sgseen"; assert_grep "$F/ipt4.state" -- '--add-set ad4-sgseen dst,dst'
+    run_ad --yes apply; assert_rc $? 0 "re-apply"
+    assert_eq "$(nsets '-n')" 0 "no temporary sets left"
+    run_ad --yes disable; assert_rc $? 0 "disable"
+    assert_eq "$(nsets)" 0 "disable destroys the sets"
+    run_ad --yes enable; assert_rc $? 0 "enable"; assert_file "$F/ipset/ad4-allow"
+    run_ad --yes uninstall; assert_rc $? 0 "uninstall"
+    assert_eq "$(nsets)" 0 "uninstall destroys the sets"
+    # a ruleset the kernel rejects at every level leaves no empty sets behind
+    new_env ipset
+    echo 'match-set ad4-bogons' >"$F/ipt-nofeature-bogons"
+    run_ad --yes install; assert_rc $? 1 "install with an unloadable ruleset fails"
+    assert_eq "$(nsets)" 0 "no empty sets left after a rejected ruleset"
+}
+
 test_plain_iptables_backend() {
     new_env iptables cron
     run_ad --yes install; assert_rc $? 0 "install (plain iptables): $(tail -n 5 "$T/out")"
@@ -679,7 +715,7 @@ test_menu_uninstall() {
 # ---------------------------------------------------------------- runner
 ALL=(list_parsing build_lists_check cli_basics install_nft dry_run_output idempotent_install migration_to_nft
      auto_replace_v1_menu auto_replace_v1_failure_keeps_old auto_replace_v1_leftovers upgrade_old_v2 newer_installed_wins
-     geo_guard migration_to_ipset plain_iptables_backend doctor input_validation
+     geo_guard migration_to_ipset ipset_sets_before_check plain_iptables_backend doctor input_validation
      rollback_on_selftest_failure render_fallback_levels modules update_logic fresh_offline_install
      legacy_list_fallback no_ipv6_host no_default_route alpine_and_none uninstall_clean v1_only_uninstall
      export_import hits disable_enable geo menu_flow menu_uninstall)
