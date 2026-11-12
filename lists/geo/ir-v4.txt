@@ -1,4 +1,4 @@
-# Country IR, IPv4, allocated+assigned, aggregated. Built 2026-10-31 with tools/build-lists.sh --geo
+# Country IR, IPv4, allocated+assigned, aggregated. Built 2026-11-12 with tools/build-lists.sh --geo
 # Source: RIR delegated-extended statistics (RIPE NCC, ARIN, APNIC, LACNIC, AFRINIC)
 2.57.3.0/24
 2.144.0.0/14
