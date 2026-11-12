@@ -1,0 +1,4 @@
+# Abuse Defender - category "abuse" (IPv6)
+# Community-curated IPv6 ranges (same rules as abuse-v4.txt). Currently empty:
+# none of the v4 owners has verifiable IPv6 space used for sensors/honeypots.
+# One CIDR per line; must not overlap ::1, fe80::/10 or ff00::/8.

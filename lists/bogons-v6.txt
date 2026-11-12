@@ -1,0 +1,27 @@
+# Abuse Defender - category "bogons" (IPv6)
+# Source: IANA IPv6 Special-Purpose Address Registry
+#   https://www.iana.org/assignments/iana-ipv6-special-registry/
+# Only prefixes that are NOT globally reachable and that a server has no business
+# sending to over its uplink are listed.
+#
+# Deliberately NOT listed (blocking them breaks IPv6 or legitimate services):
+#   ::1/128          loopback (never leaves the host)
+#   fe80::/10        link-local: default gateways are usually fe80::1, NDP/RA/DHCPv6 use it
+#   ff00::/8         multicast: neighbour discovery (ff02::1:ffXX:XXXX), router solicitation, MLD
+#   64:ff9b::/96     NAT64 well-known prefix - globally reachable, used by IPv6-only VPS
+#   64:ff9b:1::/48   local-use NAT64 (RFC 8215) - may carry a provider's NAT64 on IPv6-only hosts
+#   2001::/32        Teredo, 2002::/16 6to4 - transition relays, not "private"
+#   2001:1::/48 anycasts, 2001:3::/32 AMT, 2001:4:112::/48 AS112, 2001:20::/28 ORCHIDv2,
+#   2001:30::/28 DETs, 2620:4f:8000::/48 - all globally reachable
+# The validator also refuses any entry overlapping ::1, fe80::/10 or ff00::/8.
+#
+::/128            # Unspecified address (RFC 4291)
+::ffff:0:0/96     # IPv4-mapped addresses (RFC 4291) - never valid on the wire
+100::/64          # Discard-Only (RFC 6666)
+100:0:0:1::/64    # Dummy IPv6 prefix (RFC 9780)
+2001:2::/48       # Benchmarking (RFC 5180)
+2001:10::/28      # Deprecated ORCHID (RFC 4843)
+2001:db8::/32     # Documentation (RFC 3849)
+3fff::/20         # Documentation (RFC 9637)
+5f00::/16         # SRv6 SIDs (RFC 9602)
+fc00::/7          # Unique-Local (RFC 4193) - connected ULA subnets, gateways and AWS/GCP ULA metadata are auto-whitelisted

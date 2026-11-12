@@ -1,0 +1,41 @@
+#!/usr/bin/env bash
+# Test stub for iptables-restore / ip6tables-restore (filter table, --noflush only).
+# shellcheck source=/dev/null
+source "$(dirname "$0")/_ipt_lib.sh"
+ipt_init "$@"
+S=$IPT_STATE
+test=0 noflush=0
+for a in "$@"; do
+    case $a in
+    -t|--test) test=1 ;;
+    -n|--noflush) noflush=1 ;;
+    -w|--wait) ;;
+    *) echo "iptables-restore stub: unsupported option $a" >&2; exit 2 ;;
+    esac
+done
+[[ $noflush -eq 1 ]] || { echo "stub: abuse-defender must always use --noflush" >&2; exit 2; }
+[[ -f "$AD_FAKE/restore-fail" && $test -eq 0 ]] && { echo "iptables-restore: line 3 failed (stub)" >&2; exit 1; }
+tmp="$(mktemp)"; cp "$S" "$tmp"
+n=0
+while IFS= read -r line; do
+    n=$((n + 1))
+    case $line in
+    ''|'#'*|'*filter'|COMMIT) continue ;;
+    :*)
+        ch="${line#:}"; ch="${ch%% *}"
+        builtin_chain "$ch" && continue
+        if grep -Fxq -- "-N $ch" "$tmp"; then
+            grep -v -- "^-A $ch " "$tmp" >"$tmp.2" || true; mv "$tmp.2" "$tmp"
+        else
+            echo "-N $ch" >>"$tmp"
+        fi ;;
+    -A\ *)
+        rest="${line#-A }"; ch="${rest%% *}"; spec="${rest#* }"
+        add_rule "$tmp" "$ch" "$spec" || { echo "iptables-restore: line $n failed" >&2; rm -f "$tmp"; exit 1; } ;;
+    *) echo "iptables-restore: line $n: unsupported '$line'" >&2; rm -f "$tmp"; exit 1 ;;
+    esac
+done
+if [[ $test -eq 1 ]]; then rm -f "$tmp"; exit 0; fi
+mv "$tmp" "$S"
+[[ -f "$AD_FAKE/break-net-on-apply" ]] && echo fail >"$AD_FAKE/net-state"
+exit 0

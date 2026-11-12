@@ -1,0 +1,66 @@
+#!/usr/bin/env bash
+# Test stub emulating the parts of iptables/ip6tables that abuse-defender uses.
+# shellcheck source=/dev/null
+source "$(dirname "$0")/_ipt_lib.sh"
+ipt_init "$@"
+S=$IPT_STATE
+args=()
+for a in "$@"; do [[ $a == -w ]] && continue; args+=("$a"); done
+set -- "${args[@]}"
+
+nth_rule_line() {   # file line number of the n-th rule of chain (empty if none)
+    awk -v c="$1" -v n="$2" '$1=="-A" && $2==c { k++; if (k==n) { print NR; exit } }' "$S"
+}
+
+case ${1:-} in
+-V) echo "iptables v1.8.9 (${AD_FAKE_IPT_VARIANT:-nf_tables})" ;;
+-L)
+    if [[ ${2:-} != -n && -n ${2:-} ]]; then chain_exists "$2" "$S" || exit 1; fi
+    exit 0 ;;
+-nvxL)
+    chain_exists "$2" "$S" || exit 1
+    echo "Chain $2 (0 references)"
+    echo "    pkts      bytes target     prot opt in     out     source               destination"
+    grep -- "^-A $2 " "$S" | while read -r _ _ rest; do
+        t="$(awk '{ for (i=1;i<NF;i++) if ($i=="-j") { print $(i+1); exit } }' <<<"$rest")"
+        ms="$(awk '{ for (i=1;i<NF;i++) if ($i=="--match-set") { print "match-set", $(i+1), "dst"; exit } }' <<<"$rest")"
+        mp=""; [[ $rest == *multiport* ]] && mp="multiport dports"
+        printf '       7      420 %-10s all  --  *      *       0.0.0.0/0            0.0.0.0/0            %s %s\n' "$t" "$ms" "$mp"
+    done ;;
+-S)
+    if [[ -n ${2:-} ]]; then
+        chain_exists "$2" "$S" || { echo "iptables: No chain/target/match by that name." >&2; exit 1; }
+        if builtin_chain "$2"; then echo "-P $2 ACCEPT"; else echo "-N $2"; fi
+        grep -- "^-A $2 " "$S" || true
+    else
+        printf -- '-P INPUT ACCEPT\n-P FORWARD ACCEPT\n-P OUTPUT ACCEPT\n'
+        grep -- '^-N ' "$S" || true
+        grep -- '^-A ' "$S" || true
+    fi ;;
+-N) chain_exists "$2" "$S" && { echo "iptables: Chain already exists." >&2; exit 1; }
+    echo "-N $2" >>"$S" ;;
+-X) chain_exists "$2" "$S" || exit 1
+    if grep -q -- "^-A $2 " "$S"; then echo "iptables: Directory not empty." >&2; exit 1; fi
+    if grep -Eq -- " -j $2( |$)" "$S"; then echo "iptables: Too many links." >&2; exit 1; fi
+    grep -Fxv -- "-N $2" "$S" >"$S.tmp" || true; mv "$S.tmp" "$S" ;;
+-F) chain_exists "$2" "$S" || exit 1
+    grep -v -- "^-A $2 " "$S" >"$S.tmp" || true; mv "$S.tmp" "$S" ;;
+-A) ch=$2; shift 2; add_rule "$S" "$ch" "$*" ;;
+-C) ch=$2; shift 2; grep -Fxq -- "-A $ch $*" "$S" ;;
+-I) ch=$2; shift 2
+    pos=1; if [[ ${1:-} =~ ^[0-9]+$ ]]; then pos=$1; shift; fi
+    spec="$*"
+    chain_exists "$ch" "$S" || exit 1
+    target_ok "$spec" "$S" || exit 1
+    ln="$(nth_rule_line "$ch" "$pos")"
+    if [[ -z "$ln" ]]; then printf -- '-A %s %s\n' "$ch" "$spec" >>"$S"
+    else awk -v n="$ln" -v r="-A $ch $spec" 'NR==n {print r} {print}' "$S" >"$S.tmp" && mv "$S.tmp" "$S"; fi ;;
+-D) ch=$2; shift 2
+    if [[ ${1:-} =~ ^[0-9]+$ && $# -eq 1 ]]; then
+        ln="$(nth_rule_line "$ch" "$1")"; [[ -n "$ln" ]] || exit 1
+    else
+        ln="$(grep -Fxn -- "-A $ch $*" "$S" | head -n1 | cut -d: -f1)"; [[ -n "$ln" ]] || { echo "iptables: Bad rule." >&2; exit 1; }
+    fi
+    awk -v n="$ln" 'NR!=n' "$S" >"$S.tmp" && mv "$S.tmp" "$S" ;;
+*) echo "iptables stub: unsupported: $*" >&2; exit 2 ;;
+esac

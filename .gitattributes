@@ -1,0 +1,6 @@
+# Everything is consumed on Linux: always LF, also when checked out on Windows.
+* text=auto eol=lf
+*.sh text eol=lf
+abuse-ips.ipv4 text eol=lf
+lists/** text eol=lf
+tests/stubs/* text eol=lf

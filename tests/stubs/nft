@@ -1,0 +1,45 @@
+#!/usr/bin/env bash
+# Test stub for nft: stores loaded tables under $AD_FAKE/nft/.
+D="$AD_FAKE/nft"; mkdir -p "$D"; touch "$D/tables"
+printf 'nft %s\n' "$*" >>"$AD_FAKE/calls.log"
+
+load() {   # load FILE (content already validated)
+    local f=$1 fam name
+    if grep -q 'abuse_defender_probe' "$f"; then
+        [[ -f "$AD_FAKE/nft-unusable" ]] && { echo "Error: Could not process rule: Operation not supported" >&2; return 1; }
+        grep -q '^table inet' "$f" && [[ -f "$AD_FAKE/nft-no-inet" ]] && return 1
+        return 0
+    fi
+    [[ -f "$AD_FAKE/nft-apply-fail" ]] && { echo "Error: stub apply failure" >&2; return 1; }
+    read -r fam name < <(sed -n 's/^table \([a-z0-9]*\) \([a-z_]*\) {$/\1 \2/p' "$f" | head -n1)
+    [[ -n "$name" ]] || { echo "Error: syntax error (stub: no table block)" >&2; return 1; }
+    cp "$f" "$D/${fam}_$name.nft"
+    grep -Fxq "$fam $name" "$D/tables" || echo "$fam $name" >>"$D/tables"
+    [[ -f "$AD_FAKE/break-net-on-apply" ]] && echo fail >"$AD_FAKE/net-state"
+    return 0
+}
+
+check() {
+    local f=$1 pat
+    if [[ -f "$AD_FAKE/nft-reject" ]]; then
+        while IFS= read -r pat; do
+            [[ -n "$pat" ]] && grep -Fq -- "$pat" "$f" && { echo "Error: syntax error, unexpected '$pat' (stub)" >&2; return 1; }
+        done <"$AD_FAKE/nft-reject"
+    fi
+    # basic structural sanity: balanced braces
+    [[ "$(tr -cd '{' <"$f" | wc -c)" -eq "$(tr -cd '}' <"$f" | wc -c)" ]] || { echo "Error: unbalanced braces" >&2; return 1; }
+    return 0
+}
+
+case "$1 ${2:-}" in
+"-c -f") check "$3" ;;
+"-f -")  t="$(mktemp)"; cat >"$t"; check "$t" && load "$t"; rc=$?; rm -f "$t"; exit $rc ;;
+"-f "*)  check "$2" && load "$2" ;;
+"list tables") sed 's/^/table /' "$D/tables" ;;
+"list table") [[ -f "$D/${3}_$4.nft" ]] || exit 1
+    sed -e '/^add element/d' -e 's/counter\( drop\)\{0,1\} comment/counter packets 3 bytes 180\1 comment/' "$D/${3}_$4.nft" ;;
+"list ruleset") for f in "$D"/*.nft; do [[ -f $f ]] && cat "$f"; done ;;
+"delete table") grep -Fxq "$3 $4" "$D/tables" || { echo "Error: No such file or directory" >&2; exit 1; }
+    grep -Fxv "$3 $4" "$D/tables" >"$D/t" || true; mv "$D/t" "$D/tables"; rm -f "$D/${3}_$4.nft" ;;
+*) echo "nft stub: unsupported: $*" >&2; exit 2 ;;
+esac
