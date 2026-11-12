@@ -33,7 +33,15 @@ jobs:
           git add -A lists abuse-ips.ipv4
           git commit -m "Refresh country lists and checksums ($(date -u +%Y-%m-%d))"
           git push -f origin "$branch"
-          gh pr create --base main --head "$branch" \
+          if [ -n "$(gh pr list --head "$branch" --state open --json number -q '.[].number')" ]; then
+            echo "pull request for $branch is already open"
+            exit 0
+          fi
+          if ! gh pr create --base main --head "$branch" \
             --title "Refresh country lists and checksums ($(date -u +%Y-%m-%d))" \
-            --body "Automated rebuild by tools/build-lists.sh --geo (RIR delegation stats). Please review the diff before merging." \
-            || echo "pull request already exists"
+            --body "Automated rebuild by tools/build-lists.sh --geo (RIR delegation stats). Please review the diff before merging."; then
+            url="https://github.com/${GITHUB_REPOSITORY}/pull/new/${branch}"
+            echo "::error::Could not open the pull request. The branch $branch was pushed; open it at $url. To let this workflow open pull requests itself, enable Settings > Actions > General > Allow GitHub Actions to create and approve pull requests."
+            echo "Refresh branch pushed but no pull request was created: $url" >> "$GITHUB_STEP_SUMMARY"
+            exit 1
+          fi
