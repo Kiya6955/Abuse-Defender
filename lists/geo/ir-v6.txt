@@ -1,4 +1,4 @@
-# Country IR, IPv6, allocated+assigned. Built 2026-11-12 with tools/build-lists.sh --geo
+# Country IR, IPv6, allocated+assigned. Built 2026-11-23 with tools/build-lists.sh --geo
 # Source: RIR delegated-extended statistics (RIPE NCC, ARIN, APNIC, LACNIC, AFRINIC)
 2001:14e8::/32
 2001:1500::/32
@@ -152,7 +152,6 @@
 2a05:1440::/29
 2a05:1a00::/26
 2a05:2580::/29
-2a05:2d80::/29
 2a05:3100::/29
 2a05:3800::/29
 2a05:3e40::/29
@@ -282,6 +281,7 @@
 2a0a:32c0::/32
 2a0a:3c40::/29
 2a0a:40c0::/29
+2a0a:4100::/29
 2a0a:46c0::/29
 2a0a:480::/29
 2a0a:4b80::/29
